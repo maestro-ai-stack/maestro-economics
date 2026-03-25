@@ -1,0 +1,296 @@
+"""mecon — RA Compute CLI for maestro-economics."""
+
+import json
+import os
+import sys
+import time
+
+import click
+import httpx
+
+CONFIG_DIR = os.path.expanduser("~/.mecon")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+DEFAULT_API_BASE = "https://ra.maestro.onl"
+API_PREFIX = "/api/ra/compute/v1"
+
+
+def get_config() -> dict:
+    """Load config from env vars (precedence) then config file."""
+    api_key = os.environ.get("MECON_API_KEY")
+    api_base = os.environ.get("MECON_API_BASE")
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+    else:
+        cfg = {}
+    return {
+        "api_key": api_key or cfg.get("api_key", ""),
+        "api_base": api_base or cfg.get("api_base", DEFAULT_API_BASE),
+    }
+
+
+def api(
+    method: str,
+    path: str,
+    json_data: dict | None = None,
+    files: dict | None = None,
+    timeout: float = 30,
+    raw: bool = False,
+) -> dict | httpx.Response:
+    """Make an authenticated API call. Exits on missing key or HTTP error."""
+    cfg = get_config()
+    if not cfg["api_key"]:
+        click.echo("Error: No API key. Run 'mecon setup' first.", err=True)
+        sys.exit(1)
+    url = f"{cfg['api_base']}{API_PREFIX}{path}"
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+    resp = httpx.request(
+        method, url, json=json_data, headers=headers, timeout=timeout
+    )
+    if resp.status_code >= 400:
+        click.echo(f"Error {resp.status_code}: {resp.text}", err=True)
+        sys.exit(1)
+    if raw:
+        return resp
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# CLI group
+# ---------------------------------------------------------------------------
+
+
+@click.group()
+def main():
+    """mecon -- RA Compute CLI for economists."""
+    pass
+
+
+# ---------------------------------------------------------------------------
+# setup
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+def setup():
+    """Set API key and base URL interactively."""
+    api_key = click.prompt("API key", default="", show_default=False)
+    api_base = click.prompt("API base URL", default=DEFAULT_API_BASE)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump({"api_key": api_key, "api_base": api_base}, f, indent=2)
+    click.echo(f"Config saved to {CONFIG_FILE}")
+
+
+# ---------------------------------------------------------------------------
+# balance
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+def balance():
+    """Show credit balance."""
+    data = api("GET", "/balance")
+    click.echo(json.dumps(data, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("job_id")
+def status(job_id: str):
+    """Show job status JSON."""
+    data = api("GET", f"/jobs/{job_id}")
+    click.echo(json.dumps(data, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+
+
+@main.command(name="list")
+@click.option("--status", "job_status", default=None, help="Filter by status")
+@click.option("--limit", default=10, help="Max jobs to show")
+def list_jobs(job_status: str | None, limit: int):
+    """List recent jobs."""
+    params: dict = {"limit": limit}
+    if job_status:
+        params["status"] = job_status
+    # Build query string manually
+    qs = "&".join(f"{k}={v}" for k, v in params.items())
+    data = api("GET", f"/jobs?{qs}")
+    jobs = data if isinstance(data, list) else data.get("jobs", [])
+    if not jobs:
+        click.echo("No jobs found.")
+        return
+    for job in jobs:
+        jid = job.get("job_id", "")[:8]
+        st = job.get("status", "unknown")
+        created = job.get("created_at", "")
+        click.echo(f"{jid}  {st:<12}  {created}")
+
+
+# ---------------------------------------------------------------------------
+# cancel
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("job_id")
+def cancel(job_id: str):
+    """Cancel a running job."""
+    data = api("POST", f"/jobs/{job_id}/cancel")
+    click.echo(json.dumps(data, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# watch
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("job_id")
+@click.option("--interval", default=3, help="Poll interval in seconds")
+def watch(job_id: str, interval: int):
+    """Live-poll job progress until completion."""
+    terminal_states = {"completed", "failed", "cancelled"}
+    while True:
+        data = api("GET", f"/jobs/{job_id}")
+        st = data.get("status", "unknown")
+        progress = data.get("progress", "")
+        line = f"[{job_id[:8]}] {st}  {progress}"
+        click.echo(f"\r{line:<60}", nl=False)
+        if st in terminal_states:
+            click.echo()  # newline
+            if st == "completed":
+                click.echo("Job completed.")
+            elif st == "failed":
+                click.echo(f"Job failed: {data.get('error', '')}")
+            else:
+                click.echo("Job cancelled.")
+            break
+        time.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# logs
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("job_id")
+def logs(job_id: str):
+    """Download and display job.log."""
+    data = api("GET", f"/jobs/{job_id}/logs", raw=True)
+    if isinstance(data, httpx.Response):
+        click.echo(data.text)
+    else:
+        # API returned JSON with log content
+        click.echo(data.get("content", json.dumps(data, indent=2)))
+
+
+# ---------------------------------------------------------------------------
+# download
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("job_id")
+@click.option("-o", "--output", default=".", help="Output directory")
+def download(job_id: str, output: str):
+    """Download result files for a job."""
+    data = api("GET", f"/jobs/{job_id}/results")
+    files = data if isinstance(data, list) else data.get("files", [])
+    if not files:
+        click.echo("No result files available.")
+        return
+    os.makedirs(output, exist_ok=True)
+    for finfo in files:
+        url = finfo.get("url", "")
+        name = finfo.get("name", finfo.get("filename", "unknown"))
+        click.echo(f"Downloading {name}...")
+        resp = httpx.get(url, timeout=120)
+        filepath = os.path.join(output, name)
+        with open(filepath, "wb") as f:
+            f.write(resp.content)
+        click.echo(f"  Saved to {filepath}")
+    click.echo("Download complete.")
+
+
+# ---------------------------------------------------------------------------
+# submit
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("script", type=click.Path(exists=True))
+@click.option("--data", "data_files", multiple=True, type=click.Path(exists=True),
+              help="Data files to upload (repeatable)")
+@click.option("--gpu", default="4090", help="GPU type (default: 4090)")
+@click.option("--timeout", "job_timeout", default=3600, type=int,
+              help="Job timeout in seconds")
+@click.option("--no-watch", is_flag=True, help="Don't poll after submission")
+def submit(script: str, data_files: tuple, gpu: str, job_timeout: int, no_watch: bool):
+    """Submit a job: upload script + data, then run."""
+    # Collect all files to upload
+    all_files = [script] + list(data_files)
+    filenames = [os.path.basename(f) for f in all_files]
+
+    # 1. Create job
+    click.echo("Creating job...")
+    job = api("POST", "/jobs", json_data={
+        "gpu_type": gpu,
+        "timeout": job_timeout,
+        "files": filenames,
+    })
+    job_id = job["job_id"]
+    click.echo(f"Job created: {job_id[:8]}")
+
+    # 2. Upload files via presigned URLs
+    upload_urls = job.get("upload_urls", {})
+    for filepath, fname in zip(all_files, filenames):
+        url = upload_urls.get(fname)
+        if not url:
+            click.echo(f"Warning: no upload URL for {fname}, skipping.", err=True)
+            continue
+        click.echo(f"Uploading {fname}...")
+        with open(filepath, "rb") as f:
+            content = f.read()
+        resp = httpx.put(url, content=content, timeout=120)
+        if resp.status_code >= 400:
+            click.echo(f"Upload failed for {fname}: {resp.status_code}", err=True)
+            sys.exit(1)
+
+    # 3. Trigger run
+    click.echo("Starting job...")
+    api("POST", f"/jobs/{job_id}/run")
+
+    if no_watch:
+        click.echo(f"Job {job_id[:8]} submitted. Use 'mecon watch {job_id}' to monitor.")
+        return
+
+    # 4. Poll until done
+    click.echo("Watching progress...")
+    terminal_states = {"completed", "failed", "cancelled"}
+    while True:
+        time.sleep(3)
+        data = api("GET", f"/jobs/{job_id}")
+        st = data.get("status", "unknown")
+        progress = data.get("progress", "")
+        click.echo(f"\r[{job_id[:8]}] {st}  {progress:<40}", nl=False)
+        if st in terminal_states:
+            click.echo()
+            if st == "completed":
+                click.echo("Job completed successfully.")
+            elif st == "failed":
+                click.echo(f"Job failed: {data.get('error', '')}")
+            break
+
+
+if __name__ == "__main__":
+    main()
