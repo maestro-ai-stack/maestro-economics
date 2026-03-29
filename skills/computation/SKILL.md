@@ -1,15 +1,22 @@
-# SKILL: RA Compute — GPU/CPU Research Computing
+---
+name: maestro-economics-computation
+description: |
+  Run Python estimation code on cloud GPU via RA Compute (Modal). Handles onboarding, code generation, job submission, monitoring.
+  Triggers: GPU compute, run on GPU, structural estimation, BLP, DDC, bootstrap, Monte Carlo, JAX, GPU acceleration, submit job, mecon, RA Compute, 结构估计, GPU加速, 远程计算, 高性能计算, run my script on GPU, estimate on cloud.
+  Do NOT use for: simple pandas workflows → data-analyst, local DuckDB acceleration → data-analyst.
+---
 
-<purpose>
-Submit Python estimation code to run on GPU/CPU via RA Compute.
-Users write a run(ctx) function. The platform handles data upload,
+# RA Compute — GPU Research Computing
+
+Submit Python estimation code to run on cloud GPU via RA Compute.
+Users write a `run(ctx)` function. The platform handles CLI setup, API key,
 GPU allocation, progress monitoring, and result collection.
-</purpose>
 
-## When to Use
-User mentions: GPU compute, run on GPU, structural estimation, bootstrap,
-Monte Carlo, JAX, GPU acceleration, submit job, run remotely, RA Compute,
-mecon, 结构估计, GPU加速, 远程计算.
+## Section 0: Onboarding (run on first use)
+
+1. Check `mecon` installed: `which mecon` — if missing, install: `pip install maestro-economics`
+2. Check API key configured: `mecon whoami` — if not, guide user to https://ra.maestro.onl/settings/compute to create key, then `mecon setup`
+3. Check balance: `mecon balance` — if zero, guide to purchase credits
 
 ## Scripts (ONLY interface)
 
