@@ -1075,7 +1075,28 @@ def sync():
         manifest["files"][path]["synced_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     _save_manifest(manifest)
-    click.echo(f"\nSynced {len(upload_urls)}/{len(files_to_sync)} files ({uploaded_bytes / 1024:.1f} KB uploaded), {len(unchanged)} unchanged.")
+    click.echo(f"\nPushed {len(upload_urls)}/{len(files_to_sync)} files ({uploaded_bytes / 1024:.1f} KB uploaded), {len(unchanged)} unchanged.")
+
+    # Pull: download output/ files from R2 workspace
+    click.echo("Pulling results...")
+    r2_files_resp = api("GET", f"/workspace/{ws_id}/files?download=output")
+    r2_data = r2_files_resp.get("data", r2_files_resp) if isinstance(r2_files_resp, dict) else r2_files_resp
+    download_urls = r2_data.get("download_urls", {}) if isinstance(r2_data, dict) else {}
+
+    if download_urls:
+        downloaded = 0
+        for rpath, url in download_urls.items():
+            local_path = os.path.join(".", rpath)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            resp = httpx.get(url, timeout=300, follow_redirects=True)
+            if resp.status_code < 400:
+                with open(local_path, "wb") as f:
+                    f.write(resp.content)
+                click.echo(f"  <- {rpath} ({len(resp.content) / 1024:.1f} KB)")
+                downloaded += 1
+        click.echo(f"  Pulled {downloaded} output files.")
+    else:
+        click.echo("  No output files to pull.")
 
 
 # ---------------------------------------------------------------------------

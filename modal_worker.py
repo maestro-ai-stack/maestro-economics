@@ -142,13 +142,6 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
 
     # -- R2 paths --
     r2_uploads = R2_MOUNT / "uploads" / job_id
-    r2_job = R2_MOUNT / "jobs" / job_id
-    r2_output = r2_job / "output"
-    r2_checkpoints = r2_job / "checkpoints"
-    r2_logs = r2_job / "logs"
-
-    for d in (r2_output, r2_checkpoints, r2_logs):
-        d.mkdir(parents=True, exist_ok=True)
 
     # Local workspace for code execution (Python imports need local FS)
     local_code = LOCAL_WORK / "code"
@@ -159,23 +152,23 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
     # -- 1. Load code from R2 --
     _report_status(callback_url, job_id, "downloading", 0.0, "Loading code from R2")
 
-    # Write job metadata
-    meta = {"job_id": job_id, "gpu_type": gpu_type, "timeout": timeout_sec, "config": config}
-    (r2_job / "meta.json").write_text(json.dumps(meta, indent=2))
-
     workspace_path = payload.get("workspace_path")
+    r2_run_history = None
     script_path = local_code / "run.py"
     data_dir = local_code / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     if workspace_path:
-        # Workspace mode: read from persistent R2 workspace
+        # Workspace mode: everything lives in the workspace
         r2_workspace = R2_MOUNT / workspace_path
         entry = config.pop("entry", "run.py")
         # Copy .py files to local (fast imports), leave data on R2 mount (lazy read)
         for f in r2_workspace.rglob("*"):
             if f.is_file():
                 rel = f.relative_to(r2_workspace)
+                # Skip output/ dir (previous job results)
+                if str(rel).startswith("output"):
+                    continue
                 if f.suffix in (".py", ".json", ".yaml", ".toml", ".txt"):
                     dest = local_code / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -186,8 +179,33 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         ws_data = r2_workspace / "data"
         if ws_data.exists() and any(ws_data.iterdir()):
             data_dir = ws_data
+        # All output lives in workspace
+        import datetime as _dt
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+        # output/ = latest (overwritten each run), runs/{ts}/ = history
+        r2_output = r2_workspace / "output"
+        r2_output.mkdir(parents=True, exist_ok=True)
+        r2_run_history = r2_workspace / "runs" / f"{ts}_{job_id[:8]}"
+        r2_run_history.mkdir(parents=True, exist_ok=True)
+        r2_checkpoints = r2_workspace / "checkpoints"
+        r2_checkpoints.mkdir(parents=True, exist_ok=True)
+        r2_logs = r2_workspace / "logs"
+        r2_logs.mkdir(parents=True, exist_ok=True)
+        # Write metadata to run history
+        meta = {"job_id": job_id, "gpu_type": gpu_type, "timeout": timeout_sec, "config": config}
+        (r2_run_history / "meta.json").write_text(json.dumps(meta, indent=2))
     else:
-        # Legacy mode: find uploaded files
+        # Legacy mode: output to jobs/{job_id}/
+        r2_job = R2_MOUNT / "jobs" / job_id
+        r2_output = r2_job / "output"
+        r2_checkpoints = r2_job / "checkpoints"
+        r2_logs = r2_job / "logs"
+        for d in (r2_output, r2_checkpoints, r2_logs):
+            d.mkdir(parents=True, exist_ok=True)
+        meta = {"job_id": job_id, "gpu_type": gpu_type, "timeout": timeout_sec, "config": config}
+        (r2_job / "meta.json").write_text(json.dumps(meta, indent=2))
+
+        # Find uploaded files
         zip_file = None
         script_file = None
         if r2_uploads.exists():
@@ -245,7 +263,13 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         _report_status(callback_url, job_id, "failed", 0.0, str(e), error=tb)
         return {"status": "error", "error": tb}
 
-    # -- 3. Report completion --
+    # -- 3. Copy results to run history (workspace mode) --
+    if workspace_path and r2_run_history:
+        for f in r2_output.iterdir():
+            if f.is_file():
+                shutil.copy2(f, r2_run_history / f.name)
+
+    # -- 4. Report completion --
     _report_status(callback_url, job_id, "completed", 1.0, "Job finished", result=result)
     return {"status": "completed", "result": result}
 
