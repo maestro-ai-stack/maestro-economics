@@ -39,13 +39,13 @@ def run(ctx):
     panel = ctx.transform.winsorize(panel, "revenue", pct=0.01)
     panel = ctx.transform.lag(panel, "investment", periods=1)
 
-    ctx.progress(20, "Data prepared")
+    ctx.progress(0.2, "Data prepared")
 
     # Computation
     X = jnp.array(panel[["x1", "x2"]].values)
     # ... estimation logic ...
 
-    ctx.progress(90, "Computing SE")
+    ctx.progress(0.9, "Computing SE")
 
     return {
         "estimates": {"beta": [1.2, -0.5]},
@@ -58,8 +58,8 @@ def run(ctx):
 | Namespace | Method | Description |
 |-----------|--------|-------------|
 | ctx.data | .load(file, entity=, time=) | Load CSV/Parquet, tag panel metadata |
-| ctx.data | .data_dir | Path to uploaded data files |
-| ctx.data | .output_dir | Path for output (auto-uploaded) |
+| ctx | .data_dir | Path to uploaded data files |
+| ctx | .output_dir | Path for output (auto-uploaded) |
 | ctx.transform | .winsorize(df, col, pct) | Clip at quantile |
 | ctx.transform | .lag(df, col, periods, entity, time) | Panel lag |
 | ctx.transform | .lead(df, col, periods, entity, time) | Panel lead |
@@ -69,7 +69,7 @@ def run(ctx):
 | ctx.transform | .dummy(df, col) | Dummy variables |
 | ctx.transform | .standardize(df, cols) | Zero-mean unit-var |
 | ctx.transform | .recode(df, col, mapping) | Recode values |
-| ctx.progress | (pct, msg) | Report progress 0-100 |
+| ctx.progress | (pct, msg) | Report progress 0.0-1.0 |
 | ctx.config | dict | User config from submission |
 | ctx.gpu | .type, .memory_gb | GPU hardware info |
 

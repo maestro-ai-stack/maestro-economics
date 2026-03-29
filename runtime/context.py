@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from runtime import transforms
+from . import transforms
 
 
 @dataclass
@@ -54,6 +54,8 @@ class DataLoader:
             df = pd.read_csv(path)
         elif suffix == ".parquet":
             df = pd.read_parquet(path)
+        elif suffix == ".dta":
+            df = pd.DataFrame(pd.read_stata(path))
         else:
             raise ValueError(f"Unsupported file format: {suffix}")
 

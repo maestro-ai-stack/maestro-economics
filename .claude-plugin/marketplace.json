@@ -1,0 +1,22 @@
+{
+  "name": "maestro-economics",
+  "owner": {
+    "name": "Maestro AI",
+    "email": "ra@maestro.onl"
+  },
+  "metadata": {
+    "description": "GPU-accelerated structural estimation for economics research. Submit Python code, run on cloud GPU, get results.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "maestro-economics",
+      "description": "GPU compute for structural estimation — BLP, DDC, custom MLE/GMM, or any Python with def run(ctx) -> dict. Handles CLI setup, API key config, code generation, job submission, and monitoring.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/computation"
+      ]
+    }
+  ]
+}

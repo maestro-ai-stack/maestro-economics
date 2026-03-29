@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+from importlib.metadata import version as pkg_version
 
 import click
 import httpx
@@ -45,9 +46,19 @@ def api(
         sys.exit(1)
     url = f"{cfg['api_base']}{API_PREFIX}{path}"
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
-    resp = httpx.request(
-        method, url, json=json_data, headers=headers, timeout=timeout
-    )
+    try:
+        resp = httpx.request(
+            method, url, json=json_data, headers=headers, timeout=timeout
+        )
+    except httpx.ConnectError:
+        click.echo(f"Error: cannot connect to {cfg['api_base']}. Check your network.", err=True)
+        sys.exit(1)
+    except httpx.TimeoutException:
+        click.echo("Error: request timed out. Try again or increase --timeout.", err=True)
+        sys.exit(1)
+    except httpx.HTTPError as exc:
+        click.echo(f"Error: network request failed: {exc}", err=True)
+        sys.exit(1)
     if resp.status_code >= 400:
         click.echo(f"Error {resp.status_code}: {resp.text}", err=True)
         sys.exit(1)
@@ -61,7 +72,15 @@ def api(
 # ---------------------------------------------------------------------------
 
 
+def _get_version() -> str:
+    try:
+        return pkg_version("maestro-economics")
+    except Exception:
+        return "0.1.0"
+
+
 @click.group()
+@click.version_option(version=_get_version(), prog_name="mecon")
 def main():
     """mecon -- RA Compute CLI for economists."""
     pass
@@ -77,9 +96,10 @@ def setup():
     """Set API key and base URL interactively."""
     api_key = click.prompt("API key", default="", show_default=False)
     api_base = click.prompt("API base URL", default=DEFAULT_API_BASE)
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump({"api_key": api_key, "api_base": api_base}, f, indent=2)
+    os.chmod(CONFIG_FILE, 0o600)
     click.echo(f"Config saved to {CONFIG_FILE}")
 
 
@@ -243,11 +263,12 @@ def submit(script: str, data_files: tuple, gpu: str, job_timeout: int, no_watch:
 
     # 1. Create job
     click.echo("Creating job...")
-    job = api("POST", "/jobs", json_data={
+    resp = api("POST", "/jobs", json_data={
         "gpu_type": gpu,
-        "timeout": job_timeout,
+        "timeout_seconds": job_timeout,
         "files": filenames,
     })
+    job = resp.get("data", resp)
     job_id = job["job_id"]
     click.echo(f"Job created: {job_id[:8]}")
 
@@ -290,6 +311,37 @@ def submit(script: str, data_files: tuple, gpu: str, job_timeout: int, no_watch:
             elif st == "failed":
                 click.echo(f"Job failed: {data.get('error', '')}")
             break
+
+
+# ---------------------------------------------------------------------------
+# whoami
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+def whoami():
+    """Show current configuration and account info."""
+    cfg = get_config()
+    api_base = cfg["api_base"]
+    api_key = cfg["api_key"]
+    key_display = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else ("(not set)" if not api_key else api_key)
+    click.echo(f"API base:  {api_base}")
+    click.echo(f"API key:   {key_display}")
+    if api_key:
+        try:
+            url = f"{api_base}{API_PREFIX}/balance"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = httpx.request("GET", url, headers=headers, timeout=10)
+            if resp.status_code < 400:
+                data = resp.json()
+                if "email" in data:
+                    click.echo(f"Account:   {data['email']}")
+                if "balance" in data:
+                    click.echo(f"Balance:   {data['balance']}")
+            else:
+                click.echo(f"Account:   (could not fetch — HTTP {resp.status_code})")
+        except httpx.HTTPError:
+            click.echo("Account:   (could not connect)")
 
 
 if __name__ == "__main__":

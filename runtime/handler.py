@@ -6,11 +6,39 @@ import importlib.util
 import io
 import json
 import os
+import platform
+import signal
 import sys
 from pathlib import Path
 from typing import Any, Callable
 
 from .context import GpuInfo, JobContext
+
+
+class _Timeout:
+    """Context manager for signal-based timeout (Unix only).
+
+    On non-Unix platforms the timeout is silently ignored.
+    """
+
+    def __init__(self, seconds: int) -> None:
+        self.seconds = seconds
+        self._is_unix = platform.system() != "Windows"
+
+    def _handler(self, signum: int, frame: Any) -> None:
+        raise TimeoutError(
+            f"Job exceeded timeout of {self.seconds} seconds"
+        )
+
+    def __enter__(self) -> "_Timeout":
+        if self._is_unix and self.seconds > 0:
+            signal.signal(signal.SIGALRM, self._handler)
+            signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._is_unix and self.seconds > 0:
+            signal.alarm(0)
 
 
 def execute_job(
@@ -21,6 +49,7 @@ def execute_job(
     progress_cb: Callable[[float, str], None],
     gpu_type: str | None = None,
     gpu_memory_gb: float | None = None,
+    timeout: int = 0,
 ) -> dict[str, Any]:
     """Execute a user script's run(ctx) function.
 
@@ -36,6 +65,7 @@ def execute_job(
         progress_cb: Callable(pct, msg) for progress updates.
         gpu_type: GPU model name (e.g. "RTX 4090"), or None.
         gpu_memory_gb: GPU VRAM in GB, or None.
+        timeout: Maximum execution time in seconds (0 = no limit).
 
     Returns:
         Result dict from the user's ``run(ctx)`` function.
@@ -75,7 +105,8 @@ def execute_job(
     try:
         sys.stdout = log_buffer
         sys.stderr = log_buffer
-        result = module.run(ctx)
+        with _Timeout(timeout):
+            result = module.run(ctx)
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
