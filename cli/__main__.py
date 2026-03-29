@@ -17,17 +17,19 @@ API_PREFIX = "/api/ra/compute/v1"
 
 
 def get_config() -> dict:
-    """Load config from env vars (precedence) then config file."""
+    """Load config from: CLI --endpoint > env var > config file > default."""
     api_key = os.environ.get("MECON_API_KEY")
-    api_base = os.environ.get("MECON_API_BASE")
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE) as f:
             cfg = json.load(f)
     else:
         cfg = {}
+    # CLI --endpoint flag takes highest priority
+    ctx = click.get_current_context(silent=True)
+    endpoint = ctx.obj.get("endpoint_override") if ctx and ctx.obj else None
     return {
         "api_key": api_key or cfg.get("api_key", ""),
-        "api_base": api_base or cfg.get("api_base", DEFAULT_API_BASE),
+        "api_base": endpoint or cfg.get("api_base", DEFAULT_API_BASE),
     }
 
 
@@ -35,7 +37,6 @@ def api(
     method: str,
     path: str,
     json_data: dict | None = None,
-    files: dict | None = None,
     timeout: float = 30,
     raw: bool = False,
 ) -> dict | httpx.Response:
@@ -81,9 +82,14 @@ def _get_version() -> str:
 
 @click.group()
 @click.version_option(version=_get_version(), prog_name="mecon")
-def main():
+@click.option("--endpoint", envvar="MECON_API_BASE", default=None,
+              help="API endpoint URL (default: https://ra.maestro.onl)")
+@click.pass_context
+def main(ctx, endpoint):
     """mecon -- RA Compute CLI for economists."""
-    pass
+    ctx.ensure_object(dict)
+    if endpoint:
+        ctx.obj["endpoint_override"] = endpoint
 
 
 # ---------------------------------------------------------------------------
