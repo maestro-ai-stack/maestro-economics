@@ -353,16 +353,20 @@ def watch(job_id: str, interval: int):
     terminal_states = {"completed", "failed", "cancelled"}
     while True:
         data = api("GET", f"/jobs/{job_id}")
-        st = data.get("status", "unknown")
-        progress = data.get("progress", "")
-        line = f"[{job_id[:8]}] {st}  {progress}"
-        click.echo(f"\r{line:<60}", nl=False)
+        # API may nest under "data" key
+        job = data.get("data", data) if isinstance(data, dict) else data
+        st = job.get("status", "unknown") if isinstance(job, dict) else "unknown"
+        progress = job.get("progress_pct", job.get("progress", "")) if isinstance(job, dict) else ""
+        msg = job.get("progress_message", "") if isinstance(job, dict) else ""
+        line = f"[{job_id[:8]}] {st}  {progress}  {msg}"
+        click.echo(f"\r{line:<80}", nl=False)
         if st in terminal_states:
-            click.echo()  # newline
+            click.echo()
             if st == "completed":
                 click.echo("Job completed.")
             elif st == "failed":
-                click.echo(f"Job failed: {data.get('error', '')}")
+                error = job.get("error_message", "") if isinstance(job, dict) else ""
+                click.echo(f"Job failed: {error}")
             else:
                 click.echo("Job cancelled.")
             break
@@ -376,14 +380,43 @@ def watch(job_id: str, interval: int):
 
 @main.command()
 @click.argument("job_id")
-def logs(job_id: str):
-    """Download and display job.log."""
-    data = api("GET", f"/jobs/{job_id}/logs", raw=True)
-    if isinstance(data, httpx.Response):
-        click.echo(data.text)
-    else:
-        # API returned JSON with log content
-        click.echo(data.get("content", json.dumps(data, indent=2)))
+@click.option("-f", "--follow", is_flag=True, help="Follow log output (poll for new chunks)")
+@click.option("--interval", default=2, help="Poll interval in seconds (with -f)")
+def logs(job_id: str, follow: bool, interval: int):
+    """Display job logs. Use -f to follow in real-time."""
+    since = 0
+    while True:
+        resp = api("GET", f"/jobs/{job_id}/logs?since={since}", raw=True)
+        if isinstance(resp, httpx.Response):
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"content": resp.text, "next_since": since}
+        else:
+            data = resp
+        content = data.get("content", "")
+        if content:
+            click.echo(content, nl=False)
+        next_since = data.get("next_since", since)
+        if isinstance(next_since, int):
+            since = next_since
+        if not follow:
+            if content:
+                click.echo()  # trailing newline
+            break
+        # Check if job is done
+        job_data = api("GET", f"/jobs/{job_id}")
+        job_status = job_data.get("status", "unknown") if isinstance(job_data, dict) else "unknown"
+        if job_status in {"completed", "failed", "cancelled"}:
+            # One final read
+            resp = api("GET", f"/jobs/{job_id}/logs?since={since}", raw=True)
+            if isinstance(resp, httpx.Response):
+                final = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"content": resp.text}
+            else:
+                final = resp
+            final_content = final.get("content", "")
+            if final_content:
+                click.echo(final_content, nl=False)
+            click.echo(f"\n--- Job {job_status} ---")
+            break
+        time.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -577,12 +610,14 @@ def _zip_directory(dir_path: str) -> str:
               help="Job timeout in seconds")
 @click.option("--entry", default=None, help="Entry point file inside directory (default: run.py)")
 @click.option("--no-watch", is_flag=True, help="Don't poll after submission")
-def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: str | None, no_watch: bool):
+@click.option("--config", "run_config", default=None,
+              help='JSON config passed to ctx.config (e.g. \'{"max_evals": 100}\')')
+def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: str | None, no_watch: bool, run_config: str | None):
     """Submit a job. TARGET can be a .py file or a directory.
 
     Single file:   mecon submit script.py
     Directory:     mecon submit ./my_project/
-    With data:     mecon submit script.py --data input.csv
+    With config:   mecon submit . --config '{"simul_times": 5}'
     """
     is_dir = os.path.isdir(target)
     zip_path = None
@@ -609,6 +644,15 @@ def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: st
         filenames = [os.path.basename(f) for f in all_files]
         job_meta = {}
 
+    # Parse --config JSON
+    config_dict: dict = {}
+    if run_config:
+        try:
+            config_dict = json.loads(run_config)
+        except json.JSONDecodeError as e:
+            click.echo(f"Error: invalid --config JSON: {e}", err=True)
+            sys.exit(1)
+
     try:
         # 1. Create job
         click.echo("Creating job...")
@@ -617,6 +661,7 @@ def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: st
             "timeout_seconds": job_timeout,
             "files": filenames,
             **({"meta": job_meta} if job_meta else {}),
+            **({"config": config_dict} if config_dict else {}),
         })
         job = resp.get("data", resp)
         job_id = job["job_id"]
@@ -651,15 +696,18 @@ def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: st
         while True:
             time.sleep(3)
             data = api("GET", f"/jobs/{job_id}")
-            st = data.get("status", "unknown")
-            progress = data.get("progress", "")
-            click.echo(f"\r[{job_id[:8]}] {st}  {progress:<40}", nl=False)
+            job_resp = data.get("data", data) if isinstance(data, dict) else data
+            st = job_resp.get("status", "unknown") if isinstance(job_resp, dict) else "unknown"
+            msg = job_resp.get("progress_message", "") if isinstance(job_resp, dict) else ""
+            pct = job_resp.get("progress_pct", 0) if isinstance(job_resp, dict) else 0
+            click.echo(f"\r[{job_id[:8]}] {st}  {pct}  {msg:<50}", nl=False)
             if st in terminal_states:
                 click.echo()
                 if st == "completed":
                     click.echo("Job completed successfully.")
                 elif st == "failed":
-                    click.echo(f"Job failed: {data.get('error', '')}")
+                    error = job_resp.get("error_message", "") if isinstance(job_resp, dict) else ""
+                    click.echo(f"Job failed: {error}")
                 break
     finally:
         if zip_path and os.path.exists(zip_path):

@@ -50,12 +50,10 @@ def execute_job(
     gpu_type: str | None = None,
     gpu_memory_gb: float | None = None,
     timeout: int = 0,
+    checkpoint_dir: str | None = None,
+    log_dir: str | None = None,
 ) -> dict[str, Any]:
     """Execute a user script's run(ctx) function.
-
-    Loads the script via importlib, calls its ``run(ctx)`` entry point,
-    captures stdout/stderr to ``job.log``, and saves the return dict
-    as ``results.json`` in output_dir.
 
     Args:
         script_path: Absolute path to the user's Python script.
@@ -66,6 +64,8 @@ def execute_job(
         gpu_type: GPU model name (e.g. "RTX 4090"), or None.
         gpu_memory_gb: GPU VRAM in GB, or None.
         timeout: Maximum execution time in seconds (0 = no limit).
+        checkpoint_dir: Path for checkpoint persistence (R2 mount).
+        log_dir: Path for numbered log chunks (R2 mount).
 
     Returns:
         Result dict from the user's ``run(ctx)`` function.
@@ -83,6 +83,8 @@ def execute_job(
         config=config,
         progress_callback=progress_cb,
         gpu=gpu,
+        checkpoint_dir=Path(checkpoint_dir) if checkpoint_dir else None,
+        log_dir=Path(log_dir) if log_dir else None,
     )
 
     # Load user module
