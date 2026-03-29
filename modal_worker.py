@@ -15,6 +15,7 @@ import os
 import signal
 import tempfile
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +161,24 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
             SCRIPT_PATH.write_text(script_code)
         else:
             raise ValueError("No script URL or inline script_code provided")
+    elif script_url.endswith(".zip") or r2_urls.get("is_zip"):
+        # Zip project mode: download zip, extract, find entry point
+        zip_dest = WORK_DIR / "project.zip"
+        _download_from_r2(script_url, zip_dest)
+        project_dir = WORK_DIR / "project"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_dest, "r") as zf:
+            zf.extractall(project_dir)
+        zip_dest.unlink()
+        # Entry point: from config meta, or default run.py
+        entry = config.pop("entry", "run.py")
+        entry_path = project_dir / entry
+        if not entry_path.exists():
+            raise ValueError(f"Entry point '{entry}' not found in zip. Files: {list(project_dir.rglob('*.py'))}")
+        # Copy entry to SCRIPT_PATH, add project dir to sys.path
+        import shutil
+        shutil.copy2(entry_path, SCRIPT_PATH)
+        sys.path.insert(0, str(project_dir))
     else:
         _download_from_r2(script_url, SCRIPT_PATH)
 

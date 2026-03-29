@@ -3,8 +3,11 @@
 import json
 import os
 import sys
+import tempfile
 import time
+import zipfile
 from importlib.metadata import version as pkg_version
+from pathlib import Path
 
 import click
 import httpx
@@ -253,70 +256,119 @@ def download(job_id: str, output: str):
 # ---------------------------------------------------------------------------
 
 
+def _zip_directory(dir_path: str) -> str:
+    """Zip a directory into a temp .zip file. Returns path to zip."""
+    dir_path = os.path.abspath(dir_path)
+    base_name = os.path.basename(dir_path.rstrip("/"))
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, prefix=f"{base_name}_")
+    tmp.close()
+    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(dir_path):
+            # Skip hidden dirs, __pycache__, .git
+            _dirs[:] = [d for d in _dirs if not d.startswith(".") and d != "__pycache__"]
+            for fname in files:
+                if fname.startswith(".") or fname.endswith((".pyc", ".pyo")):
+                    continue
+                full = os.path.join(root, fname)
+                arcname = os.path.relpath(full, dir_path)
+                zf.write(full, arcname)
+    return tmp.name
+
+
 @main.command()
-@click.argument("script", type=click.Path(exists=True))
+@click.argument("target", type=click.Path(exists=True))
 @click.option("--data", "data_files", multiple=True, type=click.Path(exists=True),
               help="Data files to upload (repeatable)")
-@click.option("--gpu", default="4090", help="GPU type (default: 4090)")
+@click.option("--gpu", default="l4", help="GPU type (default: l4)")
 @click.option("--timeout", "job_timeout", default=3600, type=int,
               help="Job timeout in seconds")
+@click.option("--entry", default=None, help="Entry point file inside directory (default: run.py)")
 @click.option("--no-watch", is_flag=True, help="Don't poll after submission")
-def submit(script: str, data_files: tuple, gpu: str, job_timeout: int, no_watch: bool):
-    """Submit a job: upload script + data, then run."""
-    # Collect all files to upload
-    all_files = [script] + list(data_files)
-    filenames = [os.path.basename(f) for f in all_files]
+def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: str | None, no_watch: bool):
+    """Submit a job. TARGET can be a .py file or a directory.
 
-    # 1. Create job
-    click.echo("Creating job...")
-    resp = api("POST", "/jobs", json_data={
-        "gpu_type": gpu,
-        "timeout_seconds": job_timeout,
-        "files": filenames,
-    })
-    job = resp.get("data", resp)
-    job_id = job["job_id"]
-    click.echo(f"Job created: {job_id[:8]}")
+    Single file:   mecon submit script.py
+    Directory:     mecon submit ./my_project/
+    With data:     mecon submit script.py --data input.csv
+    """
+    is_dir = os.path.isdir(target)
+    zip_path = None
 
-    # 2. Upload files via presigned URLs
-    upload_urls = job.get("upload_urls", {})
-    for filepath, fname in zip(all_files, filenames):
-        url = upload_urls.get(fname)
-        if not url:
-            click.echo(f"Warning: no upload URL for {fname}, skipping.", err=True)
-            continue
-        click.echo(f"Uploading {fname}...")
-        with open(filepath, "rb") as f:
-            content = f.read()
-        resp = httpx.put(url, content=content, timeout=120)
-        if resp.status_code >= 400:
-            click.echo(f"Upload failed for {fname}: {resp.status_code}", err=True)
+    if is_dir:
+        # Zip the directory
+        entry_file = entry or "run.py"
+        entry_full = os.path.join(target, entry_file)
+        if not os.path.exists(entry_full):
+            click.echo(f"Error: entry point '{entry_file}' not found in {target}", err=True)
+            click.echo("Use --entry to specify the main script.", err=True)
             sys.exit(1)
+        click.echo(f"Zipping {target} (entry: {entry_file})...")
+        zip_path = _zip_directory(target)
+        zip_size = os.path.getsize(zip_path) / 1024
+        click.echo(f"  {zip_size:.0f} KB")
+        all_files = [zip_path] + list(data_files)
+        filenames = [os.path.basename(zip_path)] + [os.path.basename(f) for f in data_files]
+        job_meta = {"entry": entry_file}
+    else:
+        all_files = [target] + list(data_files)
+        filenames = [os.path.basename(f) for f in all_files]
+        job_meta = {}
 
-    # 3. Trigger run
-    click.echo("Starting job...")
-    api("POST", f"/jobs/{job_id}/run")
+    try:
+        # 1. Create job
+        click.echo("Creating job...")
+        resp = api("POST", "/jobs", json_data={
+            "gpu_type": gpu,
+            "timeout_seconds": job_timeout,
+            "files": filenames,
+            **({"meta": job_meta} if job_meta else {}),
+        })
+        job = resp.get("data", resp)
+        job_id = job["job_id"]
+        click.echo(f"Job created: {job_id[:8]}")
 
-    if no_watch:
-        click.echo(f"Job {job_id[:8]} submitted. Use 'mecon watch {job_id}' to monitor.")
-        return
+        # 2. Upload files via presigned URLs
+        upload_urls = job.get("upload_urls", {})
+        for filepath, fname in zip(all_files, filenames):
+            url = upload_urls.get(fname)
+            if not url:
+                click.echo(f"Warning: no upload URL for {fname}, skipping.", err=True)
+                continue
+            click.echo(f"Uploading {fname}...")
+            with open(filepath, "rb") as f:
+                content = f.read()
+            put_resp = httpx.put(url, content=content, timeout=120)
+            if put_resp.status_code >= 400:
+                click.echo(f"Upload failed for {fname}: {put_resp.status_code}", err=True)
+                sys.exit(1)
 
-    # 4. Poll until done
-    click.echo("Watching progress...")
-    terminal_states = {"completed", "failed", "cancelled"}
-    while True:
-        time.sleep(3)
-        data = api("GET", f"/jobs/{job_id}")
-        st = data.get("status", "unknown")
-        progress = data.get("progress", "")
-        click.echo(f"\r[{job_id[:8]}] {st}  {progress:<40}", nl=False)
-        if st in terminal_states:
-            click.echo()
-            if st == "completed":
-                click.echo("Job completed successfully.")
-            elif st == "failed":
-                click.echo(f"Job failed: {data.get('error', '')}")
-            break
+        # 3. Trigger run
+        click.echo("Starting job...")
+        api("POST", f"/jobs/{job_id}/run")
+
+        if no_watch:
+            click.echo(f"Job {job_id[:8]} submitted. Use 'mecon watch {job_id}' to monitor.")
+            return
+
+        # 4. Poll until done
+        click.echo("Watching progress...")
+        terminal_states = {"completed", "failed", "cancelled"}
+        while True:
+            time.sleep(3)
+            data = api("GET", f"/jobs/{job_id}")
+            st = data.get("status", "unknown")
+            progress = data.get("progress", "")
+            click.echo(f"\r[{job_id[:8]}] {st}  {progress:<40}", nl=False)
+            if st in terminal_states:
+                click.echo()
+                if st == "completed":
+                    click.echo("Job completed successfully.")
+                elif st == "failed":
+                    click.echo(f"Job failed: {data.get('error', '')}")
+                break
+    finally:
+        if zip_path and os.path.exists(zip_path):
+            os.unlink(zip_path)
 
 
 # ---------------------------------------------------------------------------
