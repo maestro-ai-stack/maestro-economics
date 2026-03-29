@@ -671,12 +671,12 @@ def _submit_workspace(manifest: dict, gpu: str, timeout: int, config: dict, entr
 @click.option("--config", "run_config", default=None,
               help='JSON config passed to ctx.config (e.g. \'{"max_evals": 100}\')')
 def submit(target: str | None, data_files: tuple, gpu: str, job_timeout: int, entry: str | None, no_watch: bool, run_config: str | None):
-    """Submit a job. TARGET can be a .py file, directory, or omitted for workspace mode.
+    """Submit a job. TARGET can be a .py entry point, directory, or omitted.
 
-    Workspace:     mecon submit                              # uses tracked files
-    Single file:   mecon submit script.py
-    Directory:     mecon submit ./my_project/
-    With config:   mecon submit --config '{"simul_times": 5}'
+    Workspace:     mecon submit run_blp.py                   # run specific file from workspace
+    Workspace:     mecon submit                              # run default entry (run.py)
+    Legacy:        mecon submit ./my_project/                # zip + upload directory
+    With config:   mecon submit run.py --config '{"n": 100}'
     """
     # Parse --config JSON
     config_dict: dict = {}
@@ -687,16 +687,29 @@ def submit(target: str | None, data_files: tuple, gpu: str, job_timeout: int, en
             click.echo(f"Error: invalid --config JSON: {e}", err=True)
             sys.exit(1)
 
-    # Workspace mode: no target, or target is dir with .mecon/manifest.json
+    # Workspace mode detection:
+    # 1. No target + manifest exists → workspace with default entry
+    # 2. Target is a .py file + manifest exists → workspace with that file as entry
+    # 3. Target is dir with manifest → workspace
     manifest = _load_manifest()
-    if target is None or (target and os.path.isdir(target) and os.path.exists(os.path.join(target, MANIFEST_FILE))):
-        if target and target != ".":
+    if manifest:
+        if target is None:
+            # No target: use default entry from manifest
+            return _submit_workspace(manifest, gpu, job_timeout, config_dict, entry, no_watch)
+        if target.endswith(".py") and not os.path.isdir(target):
+            # Target is a .py file in workspace: use as entry point
+            if target not in manifest.get("files", {}):
+                click.echo(f"Warning: '{target}' is not tracked. Run 'mecon add {target}' first.", err=True)
+            return _submit_workspace(manifest, gpu, job_timeout, config_dict, entry or target, no_watch)
+        if os.path.isdir(target) and os.path.exists(os.path.join(target, MANIFEST_FILE)):
             os.chdir(target)
             manifest = _load_manifest()
-        if not manifest:
-            click.echo("Error: no workspace manifest. Run 'mecon workspace init' or provide a TARGET.", err=True)
-            sys.exit(1)
-        return _submit_workspace(manifest, gpu, job_timeout, config_dict, entry, no_watch)
+            if manifest:
+                return _submit_workspace(manifest, gpu, job_timeout, config_dict, entry, no_watch)
+
+    if target is None:
+        click.echo("Error: no workspace and no TARGET. Run 'mecon workspace init' or specify a file/dir.", err=True)
+        sys.exit(1)
 
     is_dir = os.path.isdir(target)
     zip_path = None
