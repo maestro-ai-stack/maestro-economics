@@ -146,8 +146,10 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
 
     _, gpu_memory = GPU_SPECS.get(gpu_type, ("L4", 24.0))
 
-    # Clean workspace
-    for d in (DATA_DIR, OUTPUT_DIR):
+    # Clean workspace — use local vars so zip projects can override
+    data_dir = DATA_DIR
+    output_dir = OUTPUT_DIR
+    for d in (data_dir, output_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     # -- 1. Download script + data files from R2 --
@@ -179,12 +181,19 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         import shutil
         shutil.copy2(entry_path, SCRIPT_PATH)
         sys.path.insert(0, str(project_dir))
+        # Use project's data/ and output/ dirs if they exist
+        proj_data = project_dir / "data"
+        proj_output = project_dir / "output"
+        if proj_data.exists():
+            data_dir = proj_data
+        proj_output.mkdir(parents=True, exist_ok=True)
+        output_dir = proj_output
     else:
         _download_from_r2(script_url, SCRIPT_PATH)
 
     data_files: dict[str, str] = r2_urls.get("data_files", {})
     for filename, url in data_files.items():
-        _download_from_r2(url, DATA_DIR / filename)
+        _download_from_r2(url, data_dir / filename)
 
     # -- 2. Execute the user script --
     _report_status(callback_url, job_id, "running", 0.05, "Starting execution")
@@ -207,8 +216,8 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         result = execute_job(
             script_path=str(SCRIPT_PATH),
-            data_dir=str(DATA_DIR),
-            output_dir=str(OUTPUT_DIR),
+            data_dir=str(data_dir),
+            output_dir=str(output_dir),
             config=config,
             progress_cb=progress_cb,
             gpu_type=gpu_type,
@@ -227,7 +236,7 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
 
     # -- 3. Save result dict as JSON in output dir --
     import json as _json
-    results_json = OUTPUT_DIR / "results.json"
+    results_json = output_dir / "results.json"
     results_json.write_text(_json.dumps(result, indent=2, default=str))
 
     # -- 4. Zip output dir and upload to R2 --
@@ -235,9 +244,9 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
 
     results_zip = WORK_DIR / "results.zip"
     with zipfile.ZipFile(results_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        for output_file in OUTPUT_DIR.rglob("*"):
+        for output_file in output_dir.rglob("*"):
             if output_file.is_file():
-                zf.write(output_file, output_file.relative_to(OUTPUT_DIR))
+                zf.write(output_file, output_file.relative_to(output_dir))
 
     # Upload results zip if URL provided
     upload_urls: dict[str, str] = r2_urls.get("upload", {})
@@ -246,7 +255,7 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         _upload_to_r2(results_url, results_zip)
 
     # Also upload individual files if URLs provided
-    for output_file in OUTPUT_DIR.iterdir():
+    for output_file in output_dir.iterdir():
         if output_file.is_file() and output_file.name in upload_urls:
             _upload_to_r2(upload_urls[output_file.name], output_file)
 
