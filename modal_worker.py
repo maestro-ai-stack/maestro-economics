@@ -156,49 +156,66 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         shutil.rmtree(local_code)
     local_code.mkdir(parents=True, exist_ok=True)
 
-    # -- 1. Extract code from R2 uploads --
-    _report_status(callback_url, job_id, "downloading", 0.0, "Extracting code from R2")
+    # -- 1. Load code from R2 --
+    _report_status(callback_url, job_id, "downloading", 0.0, "Loading code from R2")
 
     # Write job metadata
     meta = {"job_id": job_id, "gpu_type": gpu_type, "timeout": timeout_sec, "config": config}
     (r2_job / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    # Find the uploaded file
-    zip_file = None
-    script_file = None
-    if r2_uploads.exists():
-        for f in r2_uploads.iterdir():
-            if f.suffix == ".zip":
-                zip_file = f
-            elif f.suffix == ".py":
-                script_file = f
-
+    workspace_path = payload.get("workspace_path")
     script_path = local_code / "run.py"
     data_dir = local_code / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    if zip_file:
-        # Extract zip to local workspace
-        with zipfile.ZipFile(zip_file, "r") as zf:
-            zf.extractall(local_code)
-        # Find entry point
+    if workspace_path:
+        # Workspace mode: read from persistent R2 workspace
+        r2_workspace = R2_MOUNT / workspace_path
         entry = config.pop("entry", "run.py")
-        entry_path = local_code / entry
-        if not entry_path.exists():
-            py_files = list(local_code.rglob("*.py"))
-            raise ValueError(f"Entry point '{entry}' not found. Files: {py_files}")
-        script_path = entry_path
-        # Use project data/ if exists
-        proj_data = local_code / "data"
-        if proj_data.exists():
-            data_dir = proj_data
+        # Copy .py files to local (fast imports), leave data on R2 mount (lazy read)
+        for f in r2_workspace.rglob("*"):
+            if f.is_file():
+                rel = f.relative_to(r2_workspace)
+                if f.suffix in (".py", ".json", ".yaml", ".toml", ".txt"):
+                    dest = local_code / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest)
+        script_path = local_code / entry
         sys.path.insert(0, str(local_code))
-    elif script_file:
-        shutil.copy2(script_file, script_path)
-    elif config.get("script_code"):
-        script_path.write_text(config.pop("script_code"))
+        # Data stays on R2 mount for lazy parquet reads
+        ws_data = r2_workspace / "data"
+        if ws_data.exists() and any(ws_data.iterdir()):
+            data_dir = ws_data
     else:
-        raise ValueError(f"No script found in uploads for job {job_id}")
+        # Legacy mode: find uploaded files
+        zip_file = None
+        script_file = None
+        if r2_uploads.exists():
+            for f in r2_uploads.iterdir():
+                if f.suffix == ".zip":
+                    zip_file = f
+                elif f.suffix == ".py":
+                    script_file = f
+
+        if zip_file:
+            with zipfile.ZipFile(zip_file, "r") as zf:
+                zf.extractall(local_code)
+            entry = config.pop("entry", "run.py")
+            entry_path = local_code / entry
+            if not entry_path.exists():
+                py_files = list(local_code.rglob("*.py"))
+                raise ValueError(f"Entry point '{entry}' not found. Files: {py_files}")
+            script_path = entry_path
+            proj_data = local_code / "data"
+            if proj_data.exists():
+                data_dir = proj_data
+            sys.path.insert(0, str(local_code))
+        elif script_file:
+            shutil.copy2(script_file, script_path)
+        elif config.get("script_code"):
+            script_path.write_text(config.pop("script_code"))
+        else:
+            raise ValueError(f"No script found in uploads for job {job_id}")
 
     # -- 2. Execute the user script --
     _report_status(callback_url, job_id, "running", 0.05, "Starting execution")

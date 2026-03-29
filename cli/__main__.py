@@ -1,5 +1,7 @@
 """mecon — RA Compute CLI for maestro-economics."""
 
+import glob as globmod
+import hashlib
 import json
 import os
 import sys
@@ -601,8 +603,64 @@ def _zip_directory(dir_path: str) -> str:
     return tmp.name
 
 
+def _submit_workspace(manifest: dict, gpu: str, timeout: int, config: dict, entry: str | None, no_watch: bool) -> None:
+    """Submit a job from workspace (no zip, no upload)."""
+    ws_id = manifest.get("workspace_id", "")
+    files = manifest.get("files", {})
+
+    # Check all files are synced
+    unsynced = [p for p, info in files.items() if info.get("synced_at") is None]
+    if unsynced:
+        click.echo(f"Warning: {len(unsynced)} unsynced files. Run 'mecon sync' first.", err=True)
+        for f in unsynced[:5]:
+            click.echo(f"  + {f}", err=True)
+        click.echo("Continuing anyway (using last synced versions)...")
+
+    entry_file = entry or manifest.get("entry", "run.py")
+    config["entry"] = entry_file
+
+    click.echo(f"Submitting from workspace ({len(files)} tracked files)...")
+    resp = api("POST", "/jobs", json_data={
+        "workspace_id": ws_id,
+        "gpu_type": gpu,
+        "timeout_seconds": timeout,
+        **({"config": config} if config else {}),
+    })
+    data = resp.get("data", resp) if isinstance(resp, dict) else resp
+    job_id = data.get("job_id", "") if isinstance(data, dict) else ""
+    click.echo(f"Job created: {job_id[:8]}")
+
+    # Trigger run
+    click.echo("Starting job...")
+    api("POST", f"/jobs/{job_id}/run")
+
+    if no_watch:
+        click.echo(f"Job {job_id[:8]} submitted. Use 'mecon watch {job_id}' to monitor.")
+        return
+
+    # Poll until done
+    click.echo("Watching progress...")
+    terminal_states = {"completed", "failed", "cancelled"}
+    while True:
+        time.sleep(3)
+        poll = api("GET", f"/jobs/{job_id}")
+        job_resp = poll.get("data", poll) if isinstance(poll, dict) else poll
+        st = job_resp.get("status", "unknown") if isinstance(job_resp, dict) else "unknown"
+        msg = job_resp.get("progress_message", "") if isinstance(job_resp, dict) else ""
+        pct = job_resp.get("progress_pct", 0) if isinstance(job_resp, dict) else 0
+        click.echo(f"\r[{job_id[:8]}] {st}  {pct}  {msg:<50}", nl=False)
+        if st in terminal_states:
+            click.echo()
+            if st == "completed":
+                click.echo("Job completed successfully.")
+            elif st == "failed":
+                error = job_resp.get("error_message", "") if isinstance(job_resp, dict) else ""
+                click.echo(f"Job failed: {error}")
+            break
+
+
 @main.command()
-@click.argument("target", type=click.Path(exists=True))
+@click.argument("target", type=click.Path(exists=True), default=None, required=False)
 @click.option("--data", "data_files", multiple=True, type=click.Path(exists=True),
               help="Data files to upload (repeatable)")
 @click.option("--gpu", default="l4", help="GPU type (default: l4)")
@@ -612,13 +670,34 @@ def _zip_directory(dir_path: str) -> str:
 @click.option("--no-watch", is_flag=True, help="Don't poll after submission")
 @click.option("--config", "run_config", default=None,
               help='JSON config passed to ctx.config (e.g. \'{"max_evals": 100}\')')
-def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: str | None, no_watch: bool, run_config: str | None):
-    """Submit a job. TARGET can be a .py file or a directory.
+def submit(target: str | None, data_files: tuple, gpu: str, job_timeout: int, entry: str | None, no_watch: bool, run_config: str | None):
+    """Submit a job. TARGET can be a .py file, directory, or omitted for workspace mode.
 
+    Workspace:     mecon submit                              # uses tracked files
     Single file:   mecon submit script.py
     Directory:     mecon submit ./my_project/
-    With config:   mecon submit . --config '{"simul_times": 5}'
+    With config:   mecon submit --config '{"simul_times": 5}'
     """
+    # Parse --config JSON
+    config_dict: dict = {}
+    if run_config:
+        try:
+            config_dict = json.loads(run_config)
+        except json.JSONDecodeError as e:
+            click.echo(f"Error: invalid --config JSON: {e}", err=True)
+            sys.exit(1)
+
+    # Workspace mode: no target, or target is dir with .mecon/manifest.json
+    manifest = _load_manifest()
+    if target is None or (target and os.path.isdir(target) and os.path.exists(os.path.join(target, MANIFEST_FILE))):
+        if target and target != ".":
+            os.chdir(target)
+            manifest = _load_manifest()
+        if not manifest:
+            click.echo("Error: no workspace manifest. Run 'mecon workspace init' or provide a TARGET.", err=True)
+            sys.exit(1)
+        return _submit_workspace(manifest, gpu, job_timeout, config_dict, entry, no_watch)
+
     is_dir = os.path.isdir(target)
     zip_path = None
 
@@ -643,15 +722,6 @@ def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: st
         all_files = [target] + list(data_files)
         filenames = [os.path.basename(f) for f in all_files]
         job_meta = {}
-
-    # Parse --config JSON
-    config_dict: dict = {}
-    if run_config:
-        try:
-            config_dict = json.loads(run_config)
-        except json.JSONDecodeError as e:
-            click.echo(f"Error: invalid --config JSON: {e}", err=True)
-            sys.exit(1)
 
     try:
         # 1. Create job
@@ -712,6 +782,287 @@ def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: st
     finally:
         if zip_path and os.path.exists(zip_path):
             os.unlink(zip_path)
+
+
+# ---------------------------------------------------------------------------
+# Workspace helpers
+# ---------------------------------------------------------------------------
+
+MANIFEST_DIR = ".mecon"
+MANIFEST_FILE = os.path.join(MANIFEST_DIR, "manifest.json")
+
+
+def _dir_to_project_name(dir_path: str) -> str:
+    """Convert directory path to project name (Claude Code style: /a/b/c → -a-b-c)."""
+    abs_path = os.path.abspath(dir_path)
+    return abs_path.replace("/", "-").replace("\\", "-")
+
+
+def _file_md5(path: str) -> str:
+    """Compute md5 hex digest of a file."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _load_manifest() -> dict | None:
+    """Load manifest from current directory. Returns None if not found."""
+    if not os.path.exists(MANIFEST_FILE):
+        return None
+    with open(MANIFEST_FILE) as f:
+        return json.load(f)
+
+
+def _save_manifest(manifest: dict) -> None:
+    """Save manifest to current directory."""
+    os.makedirs(MANIFEST_DIR, exist_ok=True)
+    with open(MANIFEST_FILE, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# workspace group
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def workspace():
+    """Manage compute workspaces (git-like file tracking)."""
+    pass
+
+
+@workspace.command(name="init")
+@click.argument("name", default=".")
+def workspace_init(name: str):
+    """Initialize a workspace in the current directory.
+
+    Examples:
+        mecon workspace init           # auto-name from directory path
+        mecon workspace init my-proj   # explicit name
+    """
+    if name == ".":
+        project_name = _dir_to_project_name(os.getcwd())
+    else:
+        project_name = name
+
+    # Check if manifest already exists
+    if os.path.exists(MANIFEST_FILE):
+        manifest = _load_manifest()
+        click.echo(f"Workspace already initialized: {manifest.get('project', '?')}")
+        click.echo(f"  workspace_id: {manifest.get('workspace_id', '?')}")
+        return
+
+    # Create workspace via API
+    resp = api("POST", "/workspace", json_data={"project_name": project_name})
+    data = resp.get("data", resp) if isinstance(resp, dict) else resp
+    ws_id = data.get("workspace_id", "") if isinstance(data, dict) else ""
+    r2_prefix = data.get("r2_prefix", "") if isinstance(data, dict) else ""
+
+    manifest = {
+        "project": project_name,
+        "workspace_id": ws_id,
+        "r2_prefix": r2_prefix,
+        "files": {},
+        "entry": "run.py",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    # Auto-add run.py if exists
+    if os.path.exists("run.py"):
+        manifest["files"]["run.py"] = {
+            "hash": _file_md5("run.py"),
+            "size": os.path.getsize("run.py"),
+            "synced_at": None,
+        }
+
+    _save_manifest(manifest)
+    click.echo(f"Workspace initialized: {project_name}")
+    click.echo(f"  workspace_id: {ws_id}")
+    if "run.py" in manifest["files"]:
+        click.echo("  auto-added: run.py")
+    click.echo("\nNext: mecon add <files> && mecon sync")
+
+
+@workspace.command(name="status")
+def workspace_status():
+    """Show workspace state: tracked files, sync status."""
+    manifest = _load_manifest()
+    if not manifest:
+        click.echo("No workspace. Run 'mecon workspace init' first.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Workspace: {manifest['project']}")
+    click.echo(f"  ID: {manifest.get('workspace_id', '?')}")
+    click.echo(f"  Entry: {manifest.get('entry', 'run.py')}")
+    click.echo()
+
+    files = manifest.get("files", {})
+    if not files:
+        click.echo("  No tracked files. Use 'mecon add <files>' to track.")
+        return
+
+    synced = 0
+    unsynced = 0
+    modified = 0
+    for path, info in sorted(files.items()):
+        # Check if local file changed
+        if os.path.exists(path):
+            current_hash = _file_md5(path)
+            if info.get("synced_at") is None:
+                status_icon = "+"  # new, not synced
+                unsynced += 1
+            elif current_hash != info.get("hash", ""):
+                status_icon = "M"  # modified since last sync
+                modified += 1
+            else:
+                status_icon = " "  # synced, unchanged
+                synced += 1
+        else:
+            status_icon = "!"  # missing locally
+        size_kb = info.get("size", 0) / 1024
+        click.echo(f"  {status_icon} {path:<40} {size_kb:>8.1f} KB")
+
+    click.echo(f"\n  {synced} synced, {modified} modified, {unsynced} new")
+
+
+# ---------------------------------------------------------------------------
+# add / rm (top-level for convenience)
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("files", nargs=-1, required=True)
+def add(files: tuple):
+    """Track files for workspace sync (like git add).
+
+    Examples:
+        mecon add run.py helpers.py
+        mecon add data/*.parquet
+    """
+    manifest = _load_manifest()
+    if not manifest:
+        click.echo("No workspace. Run 'mecon workspace init' first.", err=True)
+        sys.exit(1)
+
+    added = 0
+    updated = 0
+    for pattern in files:
+        matched = globmod.glob(pattern, recursive=True)
+        if not matched:
+            click.echo(f"  Warning: no files match '{pattern}'", err=True)
+            continue
+        for filepath in matched:
+            if os.path.isdir(filepath):
+                continue
+            rel = os.path.relpath(filepath)
+            _, ext = os.path.splitext(rel)
+            if ext.lower() in BANNED_EXTENSIONS:
+                click.echo(f"  Skipped (banned format): {rel}", err=True)
+                continue
+            h = _file_md5(filepath)
+            sz = os.path.getsize(filepath)
+            if rel in manifest["files"]:
+                manifest["files"][rel]["hash"] = h
+                manifest["files"][rel]["size"] = sz
+                manifest["files"][rel]["synced_at"] = None  # mark as needing sync
+                updated += 1
+            else:
+                manifest["files"][rel] = {"hash": h, "size": sz, "synced_at": None}
+                added += 1
+
+    _save_manifest(manifest)
+    click.echo(f"Added {added} new, updated {updated} files. Total: {len(manifest['files'])} tracked.")
+
+
+@main.command()
+@click.argument("files", nargs=-1, required=True)
+def rm(files: tuple):
+    """Untrack files from workspace (does not delete local files)."""
+    manifest = _load_manifest()
+    if not manifest:
+        click.echo("No workspace. Run 'mecon workspace init' first.", err=True)
+        sys.exit(1)
+
+    removed = 0
+    for filepath in files:
+        rel = os.path.relpath(filepath)
+        if rel in manifest["files"]:
+            del manifest["files"][rel]
+            removed += 1
+        else:
+            click.echo(f"  Not tracked: {rel}", err=True)
+
+    _save_manifest(manifest)
+    click.echo(f"Removed {removed} files. Total: {len(manifest['files'])} tracked.")
+
+
+# ---------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+def sync():
+    """Upload changed files to workspace (incremental, hash-based).
+
+    Compares local md5 with R2 ETag. Only uploads files that changed.
+    """
+    manifest = _load_manifest()
+    if not manifest:
+        click.echo("No workspace. Run 'mecon workspace init' first.", err=True)
+        sys.exit(1)
+
+    ws_id = manifest.get("workspace_id", "")
+    if not ws_id:
+        click.echo("Error: workspace_id not set. Re-run 'mecon workspace init'.", err=True)
+        sys.exit(1)
+
+    files_to_sync = []
+    for path, info in manifest["files"].items():
+        if not os.path.exists(path):
+            click.echo(f"  Warning: {path} missing locally, skipping.", err=True)
+            continue
+        current_hash = _file_md5(path)
+        files_to_sync.append({"path": path, "hash": current_hash})
+        # Update local hash
+        manifest["files"][path]["hash"] = current_hash
+        manifest["files"][path]["size"] = os.path.getsize(path)
+
+    if not files_to_sync:
+        click.echo("No files to sync.")
+        return
+
+    # Ask API which files need uploading
+    click.echo(f"Checking {len(files_to_sync)} files...")
+    resp = api("POST", f"/workspace/{ws_id}/sync", json_data={"files": files_to_sync})
+    data = resp.get("data", resp) if isinstance(resp, dict) else resp
+    upload_urls = data.get("upload", {}) if isinstance(data, dict) else {}
+    unchanged = data.get("unchanged", []) if isinstance(data, dict) else []
+
+    if not upload_urls:
+        click.echo(f"All {len(unchanged)} files up to date.")
+        return
+
+    # Upload changed files
+    uploaded_bytes = 0
+    for path, url in upload_urls.items():
+        with open(path, "rb") as f:
+            content = f.read()
+        click.echo(f"  Uploading {path} ({len(content) / 1024:.1f} KB)...")
+        put_resp = httpx.put(url, content=content, timeout=120)
+        if put_resp.status_code >= 400:
+            click.echo(f"  Upload failed: HTTP {put_resp.status_code}", err=True)
+            continue
+        uploaded_bytes += len(content)
+        manifest["files"][path]["synced_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    _save_manifest(manifest)
+    click.echo(f"\nSynced {len(upload_urls)}/{len(files_to_sync)} files ({uploaded_bytes / 1024:.1f} KB uploaded), {len(unchanged)} unchanged.")
 
 
 # ---------------------------------------------------------------------------
