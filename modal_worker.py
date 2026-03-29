@@ -225,21 +225,32 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
-    # -- 3. Upload outputs to R2 --
+    # -- 3. Save result dict as JSON in output dir --
+    import json as _json
+    results_json = OUTPUT_DIR / "results.json"
+    results_json.write_text(_json.dumps(result, indent=2, default=str))
+
+    # -- 4. Zip output dir and upload to R2 --
     _report_status(callback_url, job_id, "uploading", 0.90, "Uploading results")
 
+    results_zip = WORK_DIR / "results.zip"
+    with zipfile.ZipFile(results_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for output_file in OUTPUT_DIR.rglob("*"):
+            if output_file.is_file():
+                zf.write(output_file, output_file.relative_to(OUTPUT_DIR))
+
+    # Upload results zip if URL provided
     upload_urls: dict[str, str] = r2_urls.get("upload", {})
+    results_url = upload_urls.get("results.zip")
+    if results_url:
+        _upload_to_r2(results_url, results_zip)
+
+    # Also upload individual files if URLs provided
     for output_file in OUTPUT_DIR.iterdir():
         if output_file.is_file() and output_file.name in upload_urls:
             _upload_to_r2(upload_urls[output_file.name], output_file)
 
-    # Upload any file not pre-mapped (results.json, job.log always exist)
-    for name in ("results.json", "job.log"):
-        fpath = OUTPUT_DIR / name
-        if fpath.exists() and name in upload_urls:
-            _upload_to_r2(upload_urls[name], fpath)
-
-    # -- 4. Report completion --
+    # -- 5. Report completion --
     _report_status(callback_url, job_id, "completed", 1.0, "Job finished", result=result)
 
     return {"status": "completed", "result": result}

@@ -18,97 +18,217 @@ GPU allocation, progress monitoring, and result collection.
 2. Check API key configured: `mecon whoami` — if not, guide user to https://ra.maestro.onl/settings/compute to create key, then `mecon setup`
 3. Check balance: `mecon balance` — if zero, guide to purchase credits
 
-## Scripts (ONLY interface)
+## Section 1: Project Structure (MANDATORY)
 
-All scripts in skills/computation/scripts/. NEVER call API directly.
+Before writing any code, set up this structure:
 
-### submit.sh — End-to-end job submission
-Usage: ./submit.sh --code script.py --data data.csv [--gpu 4090] [--timeout 3600]
+```
+my_project/
+├── run.py              # REQUIRED: def run(ctx) -> dict
+├── *.py                # additional modules (imported by run.py)
+├── data/               # input data — ONLY .csv and .parquet allowed
+│   ├── panel.parquet   # ✓ extracted, minimal columns
+│   └── config.json     # ✓ small metadata
+├── output/             # worker writes results here (auto-uploaded as zip)
+└── .meconignore        # exclude patterns (like .gitignore)
+```
 
-### status.sh — Check job status
-Usage: ./status.sh <job_id>
+### Data Rules (ENFORCED by CLI)
 
-### download.sh — Download results
-Usage: ./download.sh <job_id> [--output ./results]
+- **Max upload: 50 MB** (code + data combined zip)
+- **Allowed formats**: .py .csv .parquet .json .txt .yaml .toml .R .jl
+- **Auto-excluded**: .mat .h5 .hdf5 .npz .pkl .png .jpg .log .pyc
+- **Upload/download time burns GPU credits** — keep data minimal
 
-## The run(ctx) Convention
+### Data Preparation (MANDATORY before submit)
 
-Users write a Python file with a `run(ctx)` function:
+If user has .mat/.h5/.dta files, convert FIRST:
+
+```python
+# .mat → parquet
+import scipy.io, pandas as pd
+mat = scipy.io.loadmat("data.mat")
+df = pd.DataFrame(mat["variable_name"])
+df.to_parquet("data/variable.parquet")
+
+# .dta → parquet
+df = pd.read_stata("data.dta")
+df.to_parquet("data/panel.parquet")
+```
+
+**Extract only needed columns/rows.** A 96MB .mat with 80 variables should become
+a 2MB .parquet with the 5 columns actually used in estimation.
+
+### .meconignore Example
+
+```
+# Large raw data (already converted to parquet)
+*.mat
+*.h5
+*.dta
+# Results from previous runs
+results/
+*.npz
+# Plots and logs
+*.png
+*.log
+convergence_*.json
+```
+
+## Section 2: The run(ctx) Contract
 
 ```python
 def run(ctx):
     import jax.numpy as jnp
+    import pandas as pd
 
-    # Load data
-    panel = ctx.data.load("data.csv", entity="firm_id", time="year")
+    ctx.progress(0.1, "Loading data")
+    df = pd.read_parquet(f"{ctx.data_dir}/panel.parquet")
 
-    # Transform (Ontology Category 3)
-    panel = ctx.transform.winsorize(panel, "revenue", pct=0.01)
-    panel = ctx.transform.lag(panel, "investment", periods=1)
+    ctx.progress(0.3, "Starting estimation")
+    X = jnp.array(df[["x1", "x2"]].values, dtype=jnp.float32)
+    # ... estimation with JAX ...
 
-    ctx.progress(0.2, "Data prepared")
+    ctx.progress(0.8, "Computing standard errors")
+    # ... write detailed output ...
+    df_results = pd.DataFrame({"param": names, "estimate": betas, "se": ses})
+    df_results.to_csv(f"{ctx.output_dir}/estimates.csv", index=False)
 
-    # Computation
-    X = jnp.array(panel[["x1", "x2"]].values)
-    # ... estimation logic ...
-
-    ctx.progress(0.9, "Computing SE")
-
+    ctx.progress(1.0, "Done")
     return {
-        "estimates": {"beta": [1.2, -0.5]},
-        "diagnostics": {"converged": True}
+        "estimates": {"beta": betas.tolist()},
+        "diagnostics": {"converged": True, "iterations": n_iter}
     }
 ```
+
+### Return Dict (REQUIRED)
+
+```python
+{
+    "estimates": { ... },     # parameter estimates, coefficients
+    "diagnostics": {          # convergence info
+        "converged": bool,    # REQUIRED
+        ...                   # gradient_norm, iterations, loss, etc.
+    }
+}
+```
+
+## Section 3: CLI Reference
+
+```bash
+# Setup
+mecon setup                          # configure API key (interactive)
+mecon setup --profile local          # configure for localhost testing
+mecon whoami                         # verify auth
+mecon balance                        # check credits
+mecon profiles                       # list all profiles
+
+# Submit
+mecon submit run.py                  # single file
+mecon submit ./my_project/           # directory (auto-zips, respects .meconignore)
+mecon submit ./project/ --gpu a100   # specify GPU
+mecon submit ./project/ --timeout 7200 --no-watch
+
+# Monitor
+mecon status <job_id>
+mecon watch <job_id>                 # live progress polling
+mecon list                           # recent jobs
+mecon logs <job_id>                  # stdout/stderr
+
+# Results
+mecon download <job_id>              # download + extract results to ./results/
+mecon download <job_id> -o ./out     # custom output dir
+
+# Cancel
+mecon cancel <job_id>
+
+# Environment switching
+mecon --profile local submit ...     # use localhost
+mecon --endpoint http://localhost:3000 balance
+```
+
+## Section 4: Writing JAX Code for GPU
+
+- Import JAX inside `run(ctx)`, not at module level
+- Use `jnp.array(data, dtype=jnp.float32)` — FP32 for search, FP64 for final validation
+- Use `jax.jit` for hot loops, `jax.vmap` for vectorization
+- Use `jaxopt.LBFGS` for optimization (not scipy in hot path)
+- Use `jax.lax.while_loop` / `fori_loop` — never Python while/if on traced values
+
+### FP32 vs FP64 Decision
+
+| GPU | FP64:FP32 ratio | Recommendation |
+|-----|-----------------|----------------|
+| T4/L4 | 1/64 | FP32 only. FP64 = 64x slower |
+| A100 | 1/2 | FP64 viable for final pass |
+| H100 | 1/2 | FP64 viable |
+
+**Pattern**: Search in FP32 on L4 (cheap), validate final result in FP64 on A100.
+
+### Translating from MATLAB/R
+
+- MATLAB `fminunc` → `jaxopt.LBFGS` or `jaxopt.ScipyMinimize`
+- R `optim(method="L-BFGS-B")` → `jaxopt.LBFGS` with bounds
+- MATLAB `normcdf` → `jax.scipy.stats.norm.cdf`
+- MATLAB matrix ops → `jnp.` equivalents
+
+## Section 5: Validation Stages
+
+### Pre-Submit (agent checks locally)
+
+1. `run.py` exists and has `def run(ctx)`
+2. No `.mat/.h5/.npz` in data/ (must be parquet/csv)
+3. Total project size < 50MB
+4. JAX imports are inside `run()`, not at module level
+5. `ctx.progress()` calls present
+6. Return dict has `estimates` and `diagnostics` keys
+
+### Post-Complete (agent verifies results)
+
+1. Job status == `completed` (not failed/cancelled)
+2. `diagnostics.converged == True`
+3. All estimates are finite (no NaN/Inf)
+4. Standard errors are positive
+5. Parameter magnitudes are plausible for the domain
+6. If FP32 search: recommend FP64 validation run on A100
+
+### FP Validation (for structural estimation)
+
+```python
+# After FP32 search converges, validate:
+# 1. Re-evaluate at optimum in FP64
+# 2. Check gradient norm < 1e-6
+# 3. Verify Hessian is positive definite
+# 4. Compare FP32 vs FP64 estimates (should be within 1e-4 relative)
+```
+
+## Section 6: GPU Rate Table
+
+| GPU | Credits/hr | Best for |
+|-----|-----------|----------|
+| T4 | 60 | Testing, small Monte Carlo |
+| L4 | 120 | FP32 search, medium estimation |
+| A10G | 180 | Larger models |
+| L40S | 300 | Large-scale search |
+| A100 | 480 | FP64 validation, BLP/DDC production |
+| H100 | 720 | Largest models |
+
+## MUST NOT
+
+- Upload raw .mat/.h5/.dta files (convert to parquet first)
+- Skip `ctx.progress()` calls (no progress = no monitoring)
+- Return non-dict results
+- Use scipy.optimize in JIT-compiled hot loops
+- Upload unnecessary files (plots, logs, previous results)
+- Run FP64 on T4/L4 (1/64 ratio = wasted credits)
 
 ## ctx API Reference
 
 | Namespace | Method | Description |
 |-----------|--------|-------------|
-| ctx.data | .load(file, entity=, time=) | Load CSV/Parquet, tag panel metadata |
-| ctx | .data_dir | Path to uploaded data files |
-| ctx | .output_dir | Path for output (auto-uploaded) |
-| ctx.transform | .winsorize(df, col, pct) | Clip at quantile |
-| ctx.transform | .lag(df, col, periods, entity, time) | Panel lag |
-| ctx.transform | .lead(df, col, periods, entity, time) | Panel lead |
-| ctx.transform | .diff(df, col, periods, entity, time) | First difference |
-| ctx.transform | .merge(left, right, on, how) | Merge with diagnostics |
-| ctx.transform | .balance_panel(df, entity, time) | Keep complete entities |
-| ctx.transform | .dummy(df, col) | Dummy variables |
-| ctx.transform | .standardize(df, cols) | Zero-mean unit-var |
-| ctx.transform | .recode(df, col, mapping) | Recode values |
+| ctx.data_dir | str | Path to uploaded data files |
+| ctx.output_dir | str | Path for output (auto-zipped and uploaded) |
 | ctx.progress | (pct, msg) | Report progress 0.0-1.0 |
 | ctx.config | dict | User config from submission |
-| ctx.gpu | .type, .memory_gb | GPU hardware info |
-
-## Writing JAX Code for GPU
-
-- Import JAX inside run(ctx), not at module level
-- Use jnp.array() to move data to GPU
-- Use jax.jit for hot loops
-- Use jax.vmap for vectorization
-- Use jaxopt for optimization (L-BFGS, etc.)
-- FP32 is fine for search; validate at FP64 if needed
-
-## Translating from MATLAB/R
-
-Common patterns:
-- MATLAB `fminunc` → `jaxopt.LBFGS` or `jaxopt.ScipyMinimize`
-- R `optim(method="L-BFGS-B")` → `jaxopt.LBFGS` with bounds
-- MATLAB matrix ops → `jnp.` equivalents
-- R data.table → pandas DataFrame with ctx.transform helpers
-
-## MUST NOT
-
-- Call API endpoints directly (use scripts only)
-- Skip progress reporting (always call ctx.progress)
-- Return non-dict results (must return a dict)
-- Use scipy in hot loops (use jax/jaxopt instead)
-
-## Validation Checklist
-
-After job completes, verify:
-- [ ] Return dict has 'estimates' and 'diagnostics' keys
-- [ ] Optimization converged
-- [ ] Results are finite (no NaN/Inf)
-- [ ] Standard errors are positive
-- [ ] Parameter magnitudes are plausible for the domain
+| ctx.gpu.type | str | GPU type (T4, L4, A100, etc.) |
+| ctx.gpu.memory_gb | float | GPU VRAM in GB |

@@ -199,6 +199,95 @@ def balance():
 
 
 # ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+MECONIGNORE_TEMPLATE = """# mecon ignore — files excluded from GPU job upload
+# Raw data (convert to .parquet first)
+*.mat
+*.h5
+*.hdf5
+*.dta
+*.npz
+*.pkl
+*.sav
+
+# Results from previous runs
+results/
+output/
+*.log
+
+# Plots and figures
+*.png
+*.jpg
+*.pdf
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+"""
+
+RUN_PY_TEMPLATE = '''"""GPU estimation job — edit this file."""
+
+
+def run(ctx):
+    import pandas as pd
+
+    ctx.progress(0.1, "Loading data")
+    # df = pd.read_parquet(f"{ctx.data_dir}/panel.parquet")
+
+    ctx.progress(0.5, "Running estimation")
+    # ... your code here ...
+
+    ctx.progress(1.0, "Done")
+    return {
+        "estimates": {},
+        "diagnostics": {"converged": True},
+    }
+'''
+
+
+@main.command()
+@click.argument("name", default=".")
+def init(name: str):
+    """Initialize a GPU compute project directory.
+
+    Creates the standard structure with run.py, data/, output/, .meconignore.
+
+    Examples:
+        mecon init my_estimation
+        mecon init .                 # initialize current directory
+    """
+    project_dir = os.path.abspath(name)
+    if name != "." and os.path.exists(project_dir):
+        click.echo(f"Error: {project_dir} already exists.", err=True)
+        sys.exit(1)
+
+    os.makedirs(os.path.join(project_dir, "data"), exist_ok=True)
+    os.makedirs(os.path.join(project_dir, "output"), exist_ok=True)
+
+    # .meconignore
+    ignore_path = os.path.join(project_dir, ".meconignore")
+    if not os.path.exists(ignore_path):
+        with open(ignore_path, "w") as f:
+            f.write(MECONIGNORE_TEMPLATE)
+
+    # run.py
+    run_path = os.path.join(project_dir, "run.py")
+    if not os.path.exists(run_path):
+        with open(run_path, "w") as f:
+            f.write(RUN_PY_TEMPLATE)
+
+    click.echo(f"Initialized project at {project_dir}")
+    click.echo("  run.py         — entry point (edit this)")
+    click.echo("  data/          — put .csv/.parquet here")
+    click.echo("  output/        — results written here (auto-uploaded)")
+    click.echo("  .meconignore   — exclude patterns")
+    click.echo()
+    click.echo("Next: add data, edit run.py, then: mecon submit .")
+
+
+# ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 
@@ -304,24 +393,52 @@ def logs(job_id: str):
 
 @main.command()
 @click.argument("job_id")
-@click.option("-o", "--output", default=".", help="Output directory")
+@click.option("-o", "--output", default="./results", help="Output directory")
 def download(job_id: str, output: str):
-    """Download result files for a job."""
+    """Download results for a completed job."""
+    # Get job status first
+    job_data = api("GET", f"/jobs/{job_id}")
+    job = job_data.get("data", job_data) if isinstance(job_data, dict) else job_data
+    status = job.get("status", "unknown") if isinstance(job, dict) else "unknown"
+
+    if status != "completed":
+        click.echo(f"Job status is '{status}'. Results available only for completed jobs.", err=True)
+        if status == "failed":
+            error = job.get("error_message", "") if isinstance(job, dict) else ""
+            click.echo(f"Error: {error}", err=True)
+        sys.exit(1)
+
+    # Get download URLs
     data = api("GET", f"/jobs/{job_id}/results")
-    files = data if isinstance(data, list) else data.get("files", [])
+    files = data.get("files", []) if isinstance(data, dict) else data
     if not files:
-        click.echo("No result files available.")
-        return
+        # Try result_url from job directly
+        result_url = job.get("result_url", "") if isinstance(job, dict) else ""
+        if result_url:
+            files = [{"name": "results.zip", "url": result_url}]
+        else:
+            click.echo("No result files available.")
+            return
+
     os.makedirs(output, exist_ok=True)
     for finfo in files:
         url = finfo.get("url", "")
-        name = finfo.get("name", finfo.get("filename", "unknown"))
+        name = finfo.get("name", finfo.get("filename", "result"))
         click.echo(f"Downloading {name}...")
-        resp = httpx.get(url, timeout=120)
+        resp = httpx.get(url, timeout=300, follow_redirects=True)
+        if resp.status_code >= 400:
+            click.echo(f"  Download failed: HTTP {resp.status_code}", err=True)
+            continue
         filepath = os.path.join(output, name)
         with open(filepath, "wb") as f:
             f.write(resp.content)
         click.echo(f"  Saved to {filepath}")
+        # Auto-extract zip files
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(filepath, "r") as zf:
+                zf.extractall(output)
+            os.unlink(filepath)
+            click.echo(f"  Extracted to {output}/")
     click.echo("Download complete.")
 
 
@@ -330,22 +447,124 @@ def download(job_id: str, output: str):
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_IGNORE_PATTERNS = {
+    "__pycache__", ".git", ".venv", "venv", "node_modules",
+    ".ipynb_checkpoints", ".mypy_cache", ".pytest_cache",
+}
+DEFAULT_IGNORE_EXTENSIONS = {
+    ".pyc", ".pyo", ".mat", ".npz", ".pkl", ".h5", ".hdf5",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg",
+    ".log", ".DS_Store",
+}
+
+
+BANNED_EXTENSIONS = {".mat", ".h5", ".hdf5", ".dta", ".npz", ".pkl", ".sav"}
+
+
+def _validate_project(dir_path: str, entry: str | None = None) -> None:
+    """Validate project structure before submission. Exits on failure."""
+    entry_file = entry or "run.py"
+    errors = []
+
+    # Check entry point exists
+    if not os.path.exists(os.path.join(dir_path, entry_file)):
+        errors.append(f"Entry point '{entry_file}' not found. Create it or use --entry.")
+
+    # Check for banned large file formats
+    banned_found = []
+    for root, _dirs, files in os.walk(dir_path):
+        _dirs[:] = [d for d in _dirs if d not in DEFAULT_IGNORE_PATTERNS]
+        for fname in files:
+            _, ext = os.path.splitext(fname)
+            if ext.lower() in BANNED_EXTENSIONS:
+                rel = os.path.relpath(os.path.join(root, fname), dir_path)
+                banned_found.append(rel)
+
+    if banned_found:
+        errors.append(
+            f"Found {len(banned_found)} raw data file(s) that should be converted to .parquet:\n"
+            + "\n".join(f"    {f}" for f in banned_found[:5])
+            + ("\n    ..." if len(banned_found) > 5 else "")
+            + "\n  Convert with: df.to_parquet('data/name.parquet')"
+            + "\n  Or add to .meconignore if not needed for this job."
+        )
+
+    # Check run.py has def run(ctx)
+    entry_path = os.path.join(dir_path, entry_file)
+    if os.path.exists(entry_path):
+        with open(entry_path) as f:
+            content = f.read()
+        if "def run(ctx" not in content and "def run(" not in content:
+            errors.append(f"'{entry_file}' must define: def run(ctx) -> dict")
+
+    if errors:
+        click.echo("Project validation failed:", err=True)
+        for i, e in enumerate(errors, 1):
+            click.echo(f"  {i}. {e}", err=True)
+        click.echo("\nRun 'mecon init' to create a valid project structure.", err=True)
+        sys.exit(1)
+
+
+def _load_meconignore(dir_path: str) -> list[str]:
+    """Load .meconignore patterns from project dir."""
+    ignore_file = os.path.join(dir_path, ".meconignore")
+    if not os.path.exists(ignore_file):
+        return []
+    with open(ignore_file) as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+
+def _should_ignore(path: str, ignore_patterns: list[str]) -> bool:
+    """Check if a relative path matches any ignore pattern."""
+    import fnmatch
+    for pattern in ignore_patterns:
+        if fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(os.path.basename(path), pattern):
+            return True
+    return False
+
+
 def _zip_directory(dir_path: str) -> str:
-    """Zip a directory into a temp .zip file. Returns path to zip."""
+    """Zip a directory into a temp .zip file, respecting .meconignore."""
     dir_path = os.path.abspath(dir_path)
     base_name = os.path.basename(dir_path.rstrip("/"))
+    ignore_patterns = _load_meconignore(dir_path)
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, prefix=f"{base_name}_")
     tmp.close()
+    file_count = 0
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _dirs, files in os.walk(dir_path):
-            # Skip hidden dirs, __pycache__, .git
-            _dirs[:] = [d for d in _dirs if not d.startswith(".") and d != "__pycache__"]
+            # Skip default ignored dirs
+            _dirs[:] = [d for d in _dirs
+                        if d not in DEFAULT_IGNORE_PATTERNS and not d.startswith(".")]
             for fname in files:
-                if fname.startswith(".") or fname.endswith((".pyc", ".pyo")):
+                if fname.startswith("."):
+                    continue
+                _, ext = os.path.splitext(fname)
+                if ext in DEFAULT_IGNORE_EXTENSIONS:
                     continue
                 full = os.path.join(root, fname)
                 arcname = os.path.relpath(full, dir_path)
+                if _should_ignore(arcname, ignore_patterns):
+                    continue
                 zf.write(full, arcname)
+                file_count += 1
+    zip_size = os.path.getsize(tmp.name)
+    click.echo(f"  {file_count} files, {zip_size / 1024:.0f} KB")
+
+    # Hard limit: 50MB. Data should be parquet/csv, not raw .mat/.h5
+    max_size = 50 * 1024 * 1024
+    if zip_size > max_size:
+        os.unlink(tmp.name)
+        click.echo(
+            f"Error: zip is {zip_size / 1024 / 1024:.1f} MB (limit: 50 MB).\n"
+            "Reduce data size:\n"
+            "  - Convert .mat/.h5 to .parquet (extract only needed columns)\n"
+            "  - Add large files to .meconignore\n"
+            "  - Use --data for separate data files",
+            err=True,
+        )
+        sys.exit(1)
+
     return tmp.name
 
 
@@ -369,6 +588,8 @@ def submit(target: str, data_files: tuple, gpu: str, job_timeout: int, entry: st
     zip_path = None
 
     if is_dir:
+        # Validate project structure
+        _validate_project(target, entry)
         # Zip the directory
         entry_file = entry or "run.py"
         entry_full = os.path.join(target, entry_file)
