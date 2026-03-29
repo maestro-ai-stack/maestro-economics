@@ -1057,25 +1057,22 @@ def sync():
     upload_urls = data.get("upload", {}) if isinstance(data, dict) else {}
     unchanged = data.get("unchanged", []) if isinstance(data, dict) else []
 
-    if not upload_urls:
-        click.echo(f"All {len(unchanged)} files up to date.")
-        return
-
-    # Upload changed files
-    uploaded_bytes = 0
-    for path, url in upload_urls.items():
-        with open(path, "rb") as f:
-            content = f.read()
-        click.echo(f"  Uploading {path} ({len(content) / 1024:.1f} KB)...")
-        put_resp = httpx.put(url, content=content, timeout=120)
-        if put_resp.status_code >= 400:
-            click.echo(f"  Upload failed: HTTP {put_resp.status_code}", err=True)
-            continue
-        uploaded_bytes += len(content)
-        manifest["files"][path]["synced_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-    _save_manifest(manifest)
-    click.echo(f"\nPushed {len(upload_urls)}/{len(files_to_sync)} files ({uploaded_bytes / 1024:.1f} KB uploaded), {len(unchanged)} unchanged.")
+    if upload_urls:
+        uploaded_bytes = 0
+        for path, url in upload_urls.items():
+            with open(path, "rb") as f:
+                content = f.read()
+            click.echo(f"  -> {path} ({len(content) / 1024:.1f} KB)...")
+            put_resp = httpx.put(url, content=content, timeout=120)
+            if put_resp.status_code >= 400:
+                click.echo(f"  Upload failed: HTTP {put_resp.status_code}", err=True)
+                continue
+            uploaded_bytes += len(content)
+            manifest["files"][path]["synced_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _save_manifest(manifest)
+        click.echo(f"  Pushed {len(upload_urls)} files ({uploaded_bytes / 1024:.1f} KB)")
+    else:
+        click.echo(f"  {len(unchanged)} files up to date.")
 
     # Pull: download output/ files from R2 workspace
     click.echo("Pulling results...")
