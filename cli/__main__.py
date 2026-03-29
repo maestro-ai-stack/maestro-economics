@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import time
+import tomllib
 import zipfile
 from importlib.metadata import version as pkg_version
 from pathlib import Path
@@ -13,27 +14,63 @@ import click
 import httpx
 
 CONFIG_DIR = os.path.expanduser("~/.mecon")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.toml")
 
 DEFAULT_API_BASE = "https://ra.maestro.onl"
+DEFAULT_PROFILE = "default"
 API_PREFIX = "/api/ra/compute/v1"
 
 
+def _read_all_profiles() -> dict:
+    """Read all profiles from config.toml."""
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    with open(CONFIG_FILE, "rb") as f:
+        return tomllib.load(f)
+
+
+def _write_all_profiles(profiles: dict) -> None:
+    """Write all profiles to config.toml (simple TOML serializer)."""
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
+    lines = []
+    for name, vals in profiles.items():
+        lines.append(f"[{name}]")
+        for k, v in vals.items():
+            lines.append(f'{k} = "{v}"')
+        lines.append("")
+    with open(CONFIG_FILE, "w") as f:
+        f.write("\n".join(lines))
+    os.chmod(CONFIG_FILE, 0o600)
+
+
+def _get_active_profile() -> str:
+    """Get active profile from: CLI --profile > env var > 'default'."""
+    ctx = click.get_current_context(silent=True)
+    if ctx and ctx.obj:
+        p = ctx.obj.get("profile")
+        if p:
+            return p
+    return os.environ.get("MECON_PROFILE", DEFAULT_PROFILE)
+
+
 def get_config() -> dict:
-    """Load config from: CLI --endpoint > env var > config file > default."""
-    api_key = os.environ.get("MECON_API_KEY")
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            cfg = json.load(f)
-    else:
-        cfg = {}
+    """Load config. Priority: CLI flags > env vars > profile in config.toml > defaults."""
+    profiles = _read_all_profiles()
+    profile_name = _get_active_profile()
+    cfg = profiles.get(profile_name, profiles.get(DEFAULT_PROFILE, {}))
+
+    # Env vars override profile values
+    api_key = os.environ.get("MECON_API_KEY") or cfg.get("api_key", "")
+    api_base = cfg.get("api_base", DEFAULT_API_BASE)
+
     # CLI --endpoint flag takes highest priority
     ctx = click.get_current_context(silent=True)
-    endpoint = ctx.obj.get("endpoint_override") if ctx and ctx.obj else None
-    return {
-        "api_key": api_key or cfg.get("api_key", ""),
-        "api_base": endpoint or cfg.get("api_base", DEFAULT_API_BASE),
-    }
+    if ctx and ctx.obj:
+        endpoint = ctx.obj.get("endpoint_override")
+        if endpoint:
+            api_base = endpoint
+
+    return {"api_key": api_key, "api_base": api_base}
 
 
 def api(
@@ -85,12 +122,16 @@ def _get_version() -> str:
 
 @click.group()
 @click.version_option(version=_get_version(), prog_name="mecon")
+@click.option("--profile", envvar="MECON_PROFILE", default=None,
+              help="Config profile (default: 'default')")
 @click.option("--endpoint", envvar="MECON_API_BASE", default=None,
-              help="API endpoint URL (default: https://ra.maestro.onl)")
+              help="API endpoint URL override")
 @click.pass_context
-def main(ctx, endpoint):
+def main(ctx, profile, endpoint):
     """mecon -- RA Compute CLI for economists."""
     ctx.ensure_object(dict)
+    if profile:
+        ctx.obj["profile"] = profile
     if endpoint:
         ctx.obj["endpoint_override"] = endpoint
 
@@ -101,15 +142,48 @@ def main(ctx, endpoint):
 
 
 @main.command()
-def setup():
-    """Set API key and base URL interactively."""
-    api_key = click.prompt("API key", default="", show_default=False)
-    api_base = click.prompt("API base URL", default=DEFAULT_API_BASE)
-    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump({"api_key": api_key, "api_base": api_base}, f, indent=2)
-    os.chmod(CONFIG_FILE, 0o600)
-    click.echo(f"Config saved to {CONFIG_FILE}")
+@click.option("--profile", "profile_name", default=None,
+              help="Profile name (default: 'default')")
+def setup(profile_name: str | None):
+    """Set API key and endpoint for a profile.
+
+    Examples:
+        mecon setup                     # configure [default] profile
+        mecon setup --profile local     # configure [local] profile
+        mecon setup --profile preview   # configure [preview] profile
+    """
+    name = profile_name or _get_active_profile()
+    profiles = _read_all_profiles()
+    existing = profiles.get(name, {})
+
+    api_key = click.prompt("API key", default=existing.get("api_key", ""), show_default=False)
+    default_base = existing.get("api_base", DEFAULT_API_BASE)
+    api_base = click.prompt("API endpoint", default=default_base)
+
+    profiles[name] = {"api_key": api_key, "api_base": api_base}
+    _write_all_profiles(profiles)
+    click.echo(f"Profile [{name}] saved to {CONFIG_FILE}")
+
+
+# ---------------------------------------------------------------------------
+# profiles
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+def profiles():
+    """List all configured profiles."""
+    all_profiles = _read_all_profiles()
+    active = _get_active_profile()
+    if not all_profiles:
+        click.echo("No profiles configured. Run 'mecon setup' to create one.")
+        return
+    for name, vals in all_profiles.items():
+        marker = "*" if name == active else " "
+        base = vals.get("api_base", DEFAULT_API_BASE)
+        key = vals.get("api_key", "")
+        key_display = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "(not set)"
+        click.echo(f"  {marker} [{name}]  {base}  key={key_display}")
 
 
 # ---------------------------------------------------------------------------
