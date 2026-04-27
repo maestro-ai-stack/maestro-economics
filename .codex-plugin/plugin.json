@@ -1,0 +1,36 @@
+{
+  "name": "maestro-economics",
+  "version": "0.6.0",
+  "description": "Public Maestro Economics skill routing for research-compute workflows.",
+  "author": {
+    "name": "Maestro AI",
+    "email": "ra@maestro.onl",
+    "url": "https://github.com/maestro-ai-stack"
+  },
+  "homepage": "https://github.com/maestro-ai-stack/maestro-economics",
+  "repository": "https://github.com/maestro-ai-stack/maestro-economics",
+  "license": "MIT",
+  "keywords": [
+    "economics",
+    "research",
+    "workflow",
+    "research",
+    "maestro",
+    "economics"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Maestro Economics",
+    "shortDescription": "Economics research-compute routing for agents",
+    "longDescription": "Install this plugin when the agent needs public, high-level Maestro Economics workflow routing. Runtime, CLI, worker, and deployment code are private and are not distributed in this plugin.",
+    "developerName": "Maestro AI",
+    "category": "Research",
+    "capabilities": [
+      "Write",
+      "Guide"
+    ],
+    "websiteURL": "https://github.com/maestro-ai-stack/maestro-economics",
+    "privacyPolicyURL": "https://maestro.onl",
+    "termsOfServiceURL": "https://maestro.onl"
+  }
+}

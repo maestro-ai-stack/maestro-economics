@@ -1,0 +1,35 @@
+name: Public Shell Boundary
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject private runtime or worker files
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden="$(
+            find . \
+              -path './.git' -prune -o \
+              \( \
+                -name '*.py' -o \
+                -name 'pyproject.toml' -o \
+                -name '*.whl' -o \
+                -path './src/*' -o \
+                -path './tests/*' -o \
+                -path './scripts/*' -o \
+                -path './references/*' -o \
+                -path './skills/*/scripts/*' -o \
+                -path './skills/*/references/*' \
+              \) -print
+          )"
+          if [[ -n "$forbidden" ]]; then
+            echo "Private runtime/worker files are forbidden in this public plugin shell:"
+            echo "$forbidden"
+            exit 1
+          fi

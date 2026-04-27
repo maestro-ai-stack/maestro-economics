@@ -1,0 +1,22 @@
+{
+  "name": "maestro-economics",
+  "version": "0.6.0",
+  "description": "Public Maestro Economics skill routing for research-compute workflows.",
+  "author": {
+    "name": "Maestro AI",
+    "email": "ra@maestro.onl",
+    "url": "https://github.com/maestro-ai-stack"
+  },
+  "homepage": "https://github.com/maestro-ai-stack/maestro-economics",
+  "repository": "https://github.com/maestro-ai-stack/maestro-economics",
+  "license": "MIT",
+  "keywords": [
+    "economics",
+    "research",
+    "workflow",
+    "research",
+    "maestro",
+    "economics"
+  ],
+  "skills": "./skills/"
+}
