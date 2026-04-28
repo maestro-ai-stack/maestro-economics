@@ -23,7 +23,7 @@ For user-facing research work, keep guidance at the workflow level:
 ## RA Compute CLI-first diagnosis
 
 For live RA Compute jobs, use the `mecon` CLI as the source of truth. Prefer
-`mecon >= 0.6.5`; the API advertises the latest CLI through response headers,
+`mecon >= 0.6.6`; the API advertises the latest CLI through response headers,
 and old clients should be upgraded before long-running GPU work.
 
 When diagnosing a job:
@@ -34,6 +34,9 @@ When diagnosing a job:
 3. For terminal jobs, run `mecon profile <job_id>` before recommending a
    different GPU tier.
 4. If logs are needed, run `mecon logs <job_id>` or `mecon debug <job_id>`.
+5. If a terminal job has artifacts, run `mecon download <job_id>`; recent
+   clients can recover inline result JSON when the server has a DB result but
+   no legacy result file.
 
 Status semantics:
 
