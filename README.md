@@ -4,7 +4,7 @@ Public plugin shell for Maestro Economics.
 
 This repository intentionally contains only host-plugin metadata and the public agent skill. It does not contain the RA Compute CLI, Python runtime, Modal worker, deployment workflow, tests, or implementation references.
 
-Current public plugin version: `0.6.8`. Live RA Compute diagnosis is
+Current public plugin version: `0.6.9`. Live RA Compute diagnosis is
 CLI-first: agents should use `mecon status`, `mecon watch`, `mecon profile`,
 `mecon logs`, `mecon download`, and `mecon debug` rather than guessing from
 stale progress text.
@@ -13,6 +13,9 @@ dict, but terminal status, timeout handling, result persistence, and billing
 belong to the Maestro worker/runtime.
 Agents should not ask user code to mark jobs completed or failed; server-side
 status, attempts, retries, and billing are owned by the platform.
+Workspace snapshots are submit-time checked in `mecon >= 0.6.9`; if tracked
+files changed after the last `mecon sync`, submit refuses instead of running
+stale code from R2.
 For long-running searches, user code should publish structured incumbents with
 `ctx.update_result(...)`; the runtime persists those as partial results if the
 configured time budget is reached.
