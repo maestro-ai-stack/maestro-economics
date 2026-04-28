@@ -4,6 +4,10 @@ Public plugin shell for Maestro Economics.
 
 This repository intentionally contains only host-plugin metadata and the public agent skill. It does not contain the RA Compute CLI, Python runtime, Modal worker, deployment workflow, tests, or implementation references.
 
+Current public plugin version: `0.6.5`. Live RA Compute diagnosis is
+CLI-first: agents should use `mecon status`, `mecon watch`, `mecon profile`,
+and `mecon debug` rather than guessing from stale progress text.
+
 ## Boundary
 
 - Public: plugin manifests, marketplace metadata, and high-level skill routing.

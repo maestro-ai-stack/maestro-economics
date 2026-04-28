@@ -5,15 +5,15 @@
     "email": "ra@maestro.onl"
   },
   "metadata": {
-    "description": "Public Maestro Economics skill routing for Claude Code agents.",
-    "version": "0.6.0"
+    "description": "Public Maestro Economics CLI-first compute diagnosis routing for Claude Code agents.",
+    "version": "0.6.5"
   },
   "plugins": [
     {
       "name": "maestro-economics",
       "source": "./",
-      "description": "Public Maestro Economics workflow routing. Runtime, CLI, worker, and deployment code are private.",
-      "version": "0.6.0",
+      "description": "Public Maestro Economics workflow routing and CLI-first RA Compute diagnosis. Runtime, CLI, worker, and deployment code are private.",
+      "version": "0.6.5",
       "author": {
         "name": "Maestro AI"
       }

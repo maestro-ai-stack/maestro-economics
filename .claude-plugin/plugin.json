@@ -1,7 +1,7 @@
 {
   "name": "maestro-economics",
-  "version": "0.6.0",
-  "description": "Public Maestro Economics skill routing for research-compute workflows.",
+  "version": "0.6.5",
+  "description": "Public Maestro Economics skill routing for CLI-first research-compute diagnosis.",
   "author": {
     "name": "Maestro AI",
     "email": "ra@maestro.onl",
@@ -14,7 +14,9 @@
     "economics",
     "research",
     "workflow",
-    "research",
+    "mecon",
+    "gpu",
+    "jax",
     "maestro",
     "economics"
   ],
