@@ -1,6 +1,6 @@
 {
   "name": "maestro-economics",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "Public Maestro Economics skill routing for CLI-first research-compute diagnosis.",
   "author": {
     "name": "Maestro AI",

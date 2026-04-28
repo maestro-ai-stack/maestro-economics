@@ -23,7 +23,7 @@ For user-facing research work, keep guidance at the workflow level:
 ## RA Compute CLI-first diagnosis
 
 For live RA Compute jobs, use the `mecon` CLI as the source of truth. Prefer
-`mecon >= 0.6.6`; the API advertises the latest CLI through response headers,
+`mecon >= 0.6.7`; the API advertises the latest CLI through response headers,
 and old clients should be upgraded before long-running GPU work.
 
 When diagnosing a job:
@@ -42,11 +42,14 @@ Status semantics:
 
 - `timed_out` means the job reached its configured time budget. It is not a
   crash, Modal platform kill, or proof of XLA hang. Partial logs, checkpoints,
-  and outputs may be available.
+  outputs, and runtime-recovered partial result JSON may be available.
 - `failed` is reserved for actual failure signals such as worker/container
   death, callback failure, unhandled runtime error, or OOM.
 - A stale progress label is not enough to call a hang. Check heartbeat and
   latest worker activity.
+- `ctx.progress()` is a user-code observability signal, not the terminal
+  network callback. Maestro's private worker/runtime owns terminal callbacks,
+  timeout handling, artifact persistence, and credit settlement.
 
 GPU advice:
 
