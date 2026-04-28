@@ -23,7 +23,7 @@ For user-facing research work, keep guidance at the workflow level:
 ## RA Compute CLI-first diagnosis
 
 For live RA Compute jobs, use the `mecon` CLI as the source of truth. Prefer
-`mecon >= 0.6.7`; the API advertises the latest CLI through response headers,
+`mecon >= 0.6.8`; the API advertises the latest CLI through response headers,
 and old clients should be upgraded before long-running GPU work.
 
 When diagnosing a job:
@@ -50,6 +50,10 @@ Status semantics:
 - `ctx.progress()` is a user-code observability signal, not the terminal
   network callback. Maestro's private worker/runtime owns terminal callbacks,
   timeout handling, artifact persistence, and credit settlement.
+- For long-running searches, tell user code to call
+  `ctx.update_result(best_dist=..., nfev=..., ...)` whenever the incumbent
+  improves. The runtime persists this generic partial result; agents must not
+  rely on workload-specific log parsing for business results.
 
 GPU advice:
 
