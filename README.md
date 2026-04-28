@@ -11,6 +11,8 @@ stale progress text.
 Timeouts are platform-owned: user code may emit `ctx.progress()` or return a
 dict, but terminal status, timeout handling, result persistence, and billing
 belong to the Maestro worker/runtime.
+Agents should not ask user code to mark jobs completed or failed; server-side
+status, attempts, retries, and billing are owned by the platform.
 For long-running searches, user code should publish structured incumbents with
 `ctx.update_result(...)`; the runtime persists those as partial results if the
 configured time budget is reached.

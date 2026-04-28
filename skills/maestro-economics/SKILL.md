@@ -50,6 +50,9 @@ Status semantics:
 - `ctx.progress()` is a user-code observability signal, not the terminal
   network callback. Maestro's private worker/runtime owns terminal callbacks,
   timeout handling, artifact persistence, and credit settlement.
+- Do not tell user scripts or agents to mark jobs completed/failed themselves.
+  They should improve `ctx.progress(...)` and `ctx.update_result(...)`; server
+  status, retries, attempts, and billing are platform-owned.
 - For long-running searches, tell user code to call
   `ctx.update_result(best_dist=..., nfev=..., ...)` whenever the incumbent
   improves. The runtime persists this generic partial result; agents must not
