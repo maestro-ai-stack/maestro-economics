@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Public Maestro research workflow SOP skills for Claude Code agents.",
-    "version": "0.6.9"
+    "version": "0.7.0"
   },
   "plugins": [
     {

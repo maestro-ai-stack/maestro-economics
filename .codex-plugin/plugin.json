@@ -1,6 +1,6 @@
 {
   "name": "maestro-economics",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "description": "Public Maestro research workflow SOP skills for compute, data, and experiments.",
   "author": {
     "name": "Maestro AI",
@@ -28,7 +28,10 @@
     "longDescription": "Install this plugin when the agent needs public Maestro research workflow SOPs. It teaches agents how to run and diagnose RA Compute jobs, discover and query RA Data datasets, and manage RA Experiments lifecycle operations. Runtime, CLI source, worker, and deployment code are private and are not distributed in this plugin.",
     "developerName": "Maestro AI",
     "category": "Research",
-    "capabilities": ["Write", "Guide"],
+    "capabilities": [
+      "Write",
+      "Guide"
+    ],
     "websiteURL": "https://github.com/maestro-ai-stack/maestro-economics",
     "privacyPolicyURL": "https://maestro.onl",
     "termsOfServiceURL": "https://maestro.onl"

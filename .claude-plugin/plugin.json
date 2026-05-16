@@ -1,6 +1,6 @@
 {
   "name": "maestro-economics",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "description": "Public Maestro research workflow SOP skills for compute, data, and experiments.",
   "author": {
     "name": "Maestro AI",
