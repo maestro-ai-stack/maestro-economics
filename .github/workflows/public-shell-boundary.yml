@@ -23,9 +23,7 @@ jobs:
                 -path './src/*' -o \
                 -path './tests/*' -o \
                 -path './scripts/*' -o \
-                -path './references/*' -o \
-                -path './skills/*/scripts/*' -o \
-                -path './skills/*/references/*' \
+                -path './references/*' \
               \) -print
           )"
           if [[ -n "$forbidden" ]]; then

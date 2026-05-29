@@ -6,7 +6,7 @@ This repository intentionally contains only host-plugin metadata and public agen
 SOP skills. It does not contain the RA Compute CLI, Python runtime, worker code,
 deployment workflow, tests, or implementation references.
 
-Current public plugin version: `0.7.1`.
+Current public plugin version: `0.7.2`.
 
 Included skills:
 
