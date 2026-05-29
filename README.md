@@ -17,7 +17,7 @@ Included skills:
 `mecon` is the CLI used by these workflows; it is not the organizing concept of
 the skills. The skills are organized by user task and research object.
 
-For RA Compute CPU/GPU jobs, install `maestro-economics>=0.7.1` and use:
+For RA Compute CPU/GPU jobs, install `maestro-economics>=0.7.2` and use:
 
 ```bash
 mecon resources

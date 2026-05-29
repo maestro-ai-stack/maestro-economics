@@ -8,7 +8,7 @@ the user asks.
 CPU CLI issue:
 
 > CPU jobs are available through `--resource`, not `--gpu`. Please upgrade to
-> `maestro-economics>=0.7.1`, then run `mecon submit . --resource cpu-4c-16gb`.
+> `maestro-economics>=0.7.2`, then run `mecon submit . --resource cpu-4c-16gb`.
 
 Timeout:
 

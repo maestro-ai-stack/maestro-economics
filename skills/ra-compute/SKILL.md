@@ -49,7 +49,7 @@ mecon resources
 mecon doctor
 ```
 
-`mecon --version` must be `0.7.1` or newer for CPU/GPU `--resource` support.
+`mecon --version` must be `0.7.2` or newer for CPU/GPU `--resource` support.
 
 ## Server-Owned Flow
 
