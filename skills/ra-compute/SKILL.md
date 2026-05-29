@@ -1,7 +1,7 @@
 ---
 name: ra-compute
 description: |
-  SOP for RA Compute GPU and long-running research jobs. Use when the user asks to prepare, submit, monitor, diagnose, resume, optimize, or download a compute job; asks about run(ctx), ctx.progress, ctx.update_result, checkpoints, JAX/XLA/JIT, CMA-ES, structural estimation, GPU tier choice, OOM, timed_out, failed, stalled, low GPU utilization, or mecon compute commands.
+  SOP for RA Compute CPU/GPU and long-running research jobs. Use when the user asks to prepare, submit, monitor, diagnose, resume, optimize, or download a compute job; asks about run(ctx), ctx.progress, ctx.update_result, checkpoints, JAX/XLA/JIT, CMA-ES, structural estimation, CPU resource choice, GPU tier choice, OOM, timed_out, failed, stalled, low GPU utilization, or mecon compute commands.
 ---
 
 # RA Compute
@@ -22,20 +22,28 @@ For a new or revised job:
 5. Run `mecon sync`.
 6. Submit a bounded smoke run before the full run.
 7. Watch the run and download artifacts after terminal status.
-8. Profile before recommending a larger GPU.
+8. Profile before recommending a larger resource.
 
-Use `mecon >= 0.6.9` for long GPU jobs.
+Use `mecon >= 0.7.1` for CPU/GPU resource selection. If `mecon submit --help`
+does not show `--resource`, upgrade before submitting CPU work:
+
+```bash
+python3 -m pip install --upgrade maestro-economics
+```
 
 ## Core Commands
 
 - `mecon doctor`: check local readiness before long work.
 - `mecon sync`: upload the current workspace snapshot.
-- `mecon submit . --gpu l4 --timeout 3600 --config '{"max_iter": 5}'`: submit a
-  smoke run.
+- `mecon resources`: list server-supported CPU/GPU profiles and rates.
+- `mecon submit . --resource cpu-4c-16gb --timeout 3600 --config '{"max_iter": 5}'`:
+  submit a CPU smoke run.
+- `mecon submit . --resource l4 --timeout 3600 --config '{"max_iter": 5}'`:
+  submit a GPU smoke run.
 - `mecon watch <job_id>`: monitor live status.
 - `mecon status <job_id>`: inspect status and server advice.
 - `mecon logs <job_id>`: inspect job logs.
-- `mecon profile <job_id>`: inspect GPU and memory profile.
+- `mecon profile <job_id>`: inspect resource, GPU, and memory profile.
 - `mecon download <job_id>`: retrieve outputs.
 - `mecon precompile . --timeout 600`: test JAX/XLA compile before a GPU retry.
 
@@ -164,6 +172,25 @@ For a failed, stalled, or suspicious job:
 5. Choose the smallest correct next action: no rerun, download result,
    resume-capable rerun, precompile, optimize workload, smaller config, or
    larger GPU.
+
+## Resource Choice
+
+Use CPU first for ordinary empirical scripts, data preparation, small
+robustness sweeps, and code that does not clearly use GPU libraries. Use GPU
+when the code actually benefits from JAX/PyTorch/CUDA acceleration or large
+parallel kernels.
+
+Do not use raw API calls or helper scripts for CPU submission. The supported
+customer path is:
+
+```bash
+mecon sync
+mecon submit . --resource cpu-4c-16gb --timeout 3600
+```
+
+Valid CPU profiles are `cpu-2c-8gb`, `cpu-4c-16gb`, `cpu-8c-32gb`, and
+`cpu-16c-64gb`. Valid GPU profiles are `t4`, `l4`, `a10g`, `l40s`, `a100`, and
+`h100`.
 
 ## GPU Advice
 
